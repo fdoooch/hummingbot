@@ -403,6 +403,8 @@ class BucketsV2Controller(ControllerBase):
                 bucket.status = GridBucketStatus.ACTIVE
             
             elif executors_states[bucket_id].is_filled:
+                self.logger().info(f"BUCKET {bucket_id} FILLED: {bucket}")
+                self.logger().info(f"Executors: {self.executors_states}")
                 self._is_new_bucket_filled = True
                 calculated_qty = self.current_qty + (
                     executors_states[bucket_id].qty
@@ -411,7 +413,7 @@ class BucketsV2Controller(ControllerBase):
                 )
                 # Get the base symbol from the trading pair (e.g., 'BTC' from 'BTC-USDT')
                 base_symbol = self.config.trading_pair.split('-')[0]
-                exchange_qty = self.market_data_provider.get_balance(self.config.connector_name, base_symbol)  
+                exchange_qty = float(self.market_data_provider.get_balance(self.config.connector_name, base_symbol))
                 self.current_qty = min(calculated_qty, exchange_qty) 
 
                 bucket.status = GridBucketStatus.FILLED
