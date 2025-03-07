@@ -534,10 +534,10 @@ class BucketsV2Controller(ControllerBase):
         """
         Update the processed data based on the current state of the strategy.
         """
-        if self.start_price.is_nan():
+        if math.isnan(self.start_price) or self.start_price == 0.0:
             self.logger().info("START_PRICE is NaN. Fetching last trade price...")
             self.start_price = self.get_last_trade_price()
-            if self.avg_entry_price.is_nan():
+            if math.isnan(self.avg_entry_price):
                 self.avg_entry_price = self.start_price
             return None
         mid_price = self.get_mid_price()
@@ -676,7 +676,7 @@ class BucketsV2Controller(ControllerBase):
         Determine actions based on the provided executor handler report.
         """
         # self.logger().info(f"Determin executor actions. start_price: {self.start_price}")
-        if self.start_price.is_nan():
+        if math.isnan(self.start_price) or self.start_price == 0.0:
             return []
         if self.entry_buckets == {}:
             self.entry_buckets = self._calculate_entry_buckets()
