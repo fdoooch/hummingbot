@@ -422,7 +422,7 @@ class BucketsV2Controller(ControllerBase):
                     self.is_last_exit_bucket_filled = True
 
             result_buckets[bucket_id] = bucket
-        self.logger().info(f"handle executors updates. ENTRY_BUCKETS: {self.entry_buckets}\n grid_buckets: {grid_buckets}\n result_buckets: {result_buckets}")
+        self.logger().info(f"handle executors updates.\nENTRY_BUCKETS: {self.entry_buckets}\nEXIT_BUCKETS: {self.exit_buckets}\ngrid_buckets: {grid_buckets}\nresult_buckets: {result_buckets}")
 
         return result_buckets
 
@@ -785,7 +785,7 @@ class BucketsV2Controller(ControllerBase):
         self.entry_buckets = {}
         self.exit_buckets = {}
         self.is_last_exit_bucket_filled = False
-        self._calculate_entry_buckets()
+        self.entry_buckets = self._calculate_entry_buckets()
 
 
     def on_stop(self):
