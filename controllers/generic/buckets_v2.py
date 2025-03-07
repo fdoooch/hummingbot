@@ -593,9 +593,12 @@ class BucketsV2Controller(ControllerBase):
         for bucket_id, bucket in self.entry_buckets.items():
 
             if bucket.status == GridBucketStatus.ACTIVE and self.executors_states[bucket_id].is_active:
+                # Place only one entry order at once
+                break
+
+            if bucket.status == GridBucketStatus.FILLED:
                 continue
 
-            keep_position = bucket.status == GridBucketStatus.FILLED
             # stop current bucket executor
             if self.executors_states.get(bucket_id):
                 self.logger().info(f"STOP ENTRY EXECUTOR. {bucket}")
@@ -604,17 +607,15 @@ class BucketsV2Controller(ControllerBase):
                     StopExecutorAction(
                         controller_id=self.config.id,
                         executor_id=self.executors_states[bucket_id].id,
-                        keep_position=keep_position,
                     )
                 )
-                
-            if bucket.status == GridBucketStatus.FILLED:
-                continue
+
             if bucket.status == GridBucketStatus.SKIPPED:
                 continue
 
             # create new bucket executor
             self.logger().info(f"NEW ENTRY EXECUTOR. {bucket}")
+            self.logger().info(f"Executors: {self.executors_states}")
             actions.append(
                 CreateExecutorAction(
                     controller_id=self.config.id,
@@ -634,7 +635,11 @@ class BucketsV2Controller(ControllerBase):
         actions = []
         for bucket_id, bucket in self.exit_buckets.items():
 
-            keep_position = bucket.status == GridBucketStatus.FILLED
+            if bucket.status == GridBucketStatus.FILLED:
+                continue
+
+            if bucket.status == GridBucketStatus.ACTIVE and self.executors_states[bucket_id].is_active:
+                continue
 
             # stop current bucket executor
             if self.executors_states.get(bucket_id):
@@ -642,12 +647,9 @@ class BucketsV2Controller(ControllerBase):
                     StopExecutorAction(
                         controller_id=self.config.id,
                         executor_id=self.executors_states[bucket_id].id,
-                        keep_position=keep_position,
                     )
                 )
                 
-            if bucket.status == GridBucketStatus.FILLED:
-                continue
             if bucket.status == GridBucketStatus.SKIPPED:
                 continue
 
@@ -658,6 +660,8 @@ class BucketsV2Controller(ControllerBase):
                 price = max(self.last_trade_price, bucket.price)
 
             # create new bucket executor
+            self.logger().info(f"NEW EXIT EXECUTOR. {bucket}")
+            self.logger().info(f"Executors: {self.executors_states}")
             actions.append(
                 CreateExecutorAction(
                     controller_id=self.config.id,
