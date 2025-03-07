@@ -686,7 +686,7 @@ class BucketsV2Controller(ControllerBase):
         Determine actions based on the provided executor handler report.
         """
         # self.logger().info(f"Determin executor actions. start_price: {self.start_price}")
-        if math.isnan(self.start_price) or self.start_price == 0.0 or self.average_entry_price == 0.0:
+        if math.isnan(self.start_price) or self.start_price == 0.0 or self.avg_entry_price == 0.0:
             return []
         if self.entry_buckets == {}:
             self.entry_buckets = self._calculate_entry_buckets()
