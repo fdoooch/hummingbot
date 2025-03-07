@@ -543,7 +543,7 @@ class BucketsV2Controller(ControllerBase):
         if math.isnan(self.start_price) or self.start_price == 0.0:
             self.logger().info("START_PRICE is NaN. Fetching last trade price...")
             self.start_price = self.get_last_trade_price()
-            if math.isnan(self.avg_entry_price):
+            if math.isnan(self.avg_entry_price) or self.avg_entry_price == 0.0:
                 self.avg_entry_price = self.start_price
             return None
         mid_price = self.get_mid_price()
@@ -686,7 +686,7 @@ class BucketsV2Controller(ControllerBase):
         Determine actions based on the provided executor handler report.
         """
         # self.logger().info(f"Determin executor actions. start_price: {self.start_price}")
-        if math.isnan(self.start_price) or self.start_price == 0.0:
+        if math.isnan(self.start_price) or self.start_price == 0.0 or self.average_entry_price == 0.0:
             return []
         if self.entry_buckets == {}:
             self.entry_buckets = self._calculate_entry_buckets()
