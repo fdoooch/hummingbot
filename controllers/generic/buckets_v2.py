@@ -1,7 +1,8 @@
-from decimal import Decimal
+# from decimal import Decimal
 from enum import Enum
 from typing import Any, Dict, List, Set
 from pydantic import BaseModel, Field, validator
+import math
 
 from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.core.data_type.common import OrderType, PositionMode, PriceType, TradeType
@@ -20,14 +21,14 @@ from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 class EntryBucket(BaseModel):
     id: str
-    drawdown_percentage: Decimal # На сколько процентов должна упасть цена от средней для входа.
-    amount: Decimal
+    drawdown_percentage: float # На сколько процентов должна упасть цена от средней для входа.
+    amount: float
 
 
 class ExitBucket(BaseModel):
     id: str
-    profit_percentage: Decimal  # на сколько процентов должна вырасти цена от средней для выхода.
-    qty_share: Decimal
+    profit_percentage: float  # на сколько процентов должна вырасти цена от средней для выхода.
+    qty_share: float
 
 
 class GridBucketStatus(Enum):
@@ -41,9 +42,9 @@ class GridBucketStatus(Enum):
 
 class GridBucket(BaseModel):
     id: str
-    price: Decimal
-    qty: Decimal
-    amount: Decimal
+    price: float
+    qty: float
+    amount: float 
     side: TradeType
     status: GridBucketStatus = GridBucketStatus.NOT_ACTIVE
     is_last: bool = False
@@ -55,9 +56,9 @@ class ExecutorState(BaseModel):
     level_id: str
     is_active: bool
     is_filled: bool
-    average_entry_price: Decimal
-    amount: Decimal
-    qty: Decimal
+    average_entry_price: float
+    amount: float
+    qty: float
 
 
 class BucketsV2ControllerConfig(ControllerConfigBase):
@@ -110,20 +111,20 @@ class BucketsV2ControllerConfig(ControllerConfigBase):
         ),
     )
     entry_buckets: List[EntryBucket] = Field(
-        default=[EntryBucket(id="entry_0", drawdown_percentage=Decimal("0"), amount=Decimal("0"))],
+        default=[EntryBucket(id="entry_0", drawdown_percentage=0.0, amount=0.0)],
         client_data=ClientFieldData(
             is_updatable=True,
         ),
     )
     exit_buckets: List[ExitBucket] = Field(
-        default=[ExitBucket(id="exit_0", profit_percentage=Decimal("0.5"), qty_share=Decimal("1.0"))],
+        default=[ExitBucket(id="exit_0", profit_percentage=0.5, qty_share=1.0)],
         client_data=ClientFieldData(
             is_updatable=True,
         ),
     )
-    activation_bounds: Decimal = Field(default=Decimal("0.01"), client_data=ClientFieldData(is_updatable=True))
-    min_order_amount: Decimal = Field(
-        default=Decimal("10"),
+    activation_bounds: float = Field(default=0.01, client_data=ClientFieldData(is_updatable=True))
+    min_order_amount: float = Field(
+        default=10.0,
         client_data=ClientFieldData(prompt_on_new=True, is_updatable=True),
         prompt=lambda mi: "Enter the minimum order amount in USDT: ",
     )
@@ -238,10 +239,10 @@ class BucketsV2Controller(ControllerBase):
         self.exit_buckets: Dict[str, GridBucket] = {}
         self._entry_grid_updated_at = 0
         self._exit_grid_updated_at = 0
-        self.current_qty: Decimal = Decimal("0.0")
-        self.start_price: Decimal = self.get_last_trade_price()
+        self.current_qty: float = 0.0
+        self.start_price: float = self.get_last_trade_price()
         self.last_trade_price = self.start_price
-        self.avg_entry_price: Decimal = self.start_price
+        self.avg_entry_price: float = self.start_price
         self.executors_actions: List[ExecutorAction] = []
         self.trading_rules = None
         self.entry_buckets: Dict[str, GridBucket] = {}
@@ -415,14 +416,16 @@ class BucketsV2Controller(ControllerBase):
         return result_buckets
 
 
-    def get_current_qty_from_exchange(self) -> Decimal:
+    def get_current_qty_from_exchange(self) -> float:
         # Get the base symbol from the trading pair (e.g., 'BTC' from 'BTC-USDT')
         base_symbol = self.config.trading_pair.split('-')[0]
         exchange_qty = self.market_data_provider.get_balance(self.config.connector_name, base_symbol)
-        return exchange_qty
+        if math.isnan(exchange_qty):
+            return 0.0
+        return float(exchange_qty)
 
 
-    def _is_price_out_of_trading_range(self, price: Decimal, side: TradeType) -> bool:
+    def _is_price_out_of_trading_range(self, price: float, side: TradeType) -> bool:
         if side == TradeType.BUY:
             return price <= self.config.activation_bounds
         elif side == TradeType.SELL:
@@ -431,10 +434,13 @@ class BucketsV2Controller(ControllerBase):
             raise ValueError(f"Unknown trade type: {side}")
 
 
-    def get_mid_price(self) -> Decimal:
-        return self.market_data_provider.get_price_by_type(
+    def get_mid_price(self) -> float:
+        mid_price = self.market_data_provider.get_price_by_type(
             self.config.connector_name, self.config.trading_pair, PriceType.MidPrice
         )
+        if math.isnan(mid_price):
+            return 0.0
+        return float(mid_price)
 
     def _on_last_exit_bucket_filled(self) -> bool:        
         self.logger().info("Last exit bucket filled")
@@ -461,7 +467,7 @@ class BucketsV2Controller(ControllerBase):
     #             self.logger().error("Error fetching start price: %s", e)
     #             time.sleep(1)
 
-    def get_last_trade_price(self) -> Decimal:
+    def get_last_trade_price(self) -> float:
         self.last_trade_price = self.market_data_provider.quantize_order_price(
             self.config.connector_name,
             self.config.trading_pair,
@@ -471,6 +477,8 @@ class BucketsV2Controller(ControllerBase):
                 PriceType.LastTrade,
             ),
         )
+        if math.isnan(self.last_trade_price):
+            self.last_trade_price = 0.0
 
         return self.last_trade_price
 
@@ -479,17 +487,17 @@ class BucketsV2Controller(ControllerBase):
             executor for executor in self.executors_info if executor.is_active and executor.is_trading == is_trading
         ]
 
-    def calculate_average_long_entry_price(self) -> Decimal:
-        price = Decimal("0")
-        qty = 0
-        amount = 0
+    def calculate_average_long_entry_price(self) -> float:
+        price = 0.0
+        qty = 0.0
+        amount = 0.0
         for bucket_id, bucket in self.entry_buckets.items():
             if bucket.status == GridBucketStatus.FILLED:
                 qty += bucket.qty
                 amount += bucket.amount
         if qty > 0:
-            price = Decimal(amount / qty)
-        if price != Decimal("0"):
+            price = amount / qty
+        if price != 0.0:
             self.logger().info(f"AVERAGE_ENTRY_PRICE: {price}")
             return price
         self.logger().info(f"AVERAGE_ENTRY_PRICE is START_PRICE: {self.start_price}")
@@ -708,7 +716,7 @@ class BucketsV2Controller(ControllerBase):
     #     stop_actions: List[StopExecutorAction] = []
     #     return stop_actions
 
-    def get_limit_entry_executor_config(self, price: Decimal, qty: Decimal, level_id: int) -> PositionExecutorConfig:
+    def get_limit_entry_executor_config(self, price: float, qty: float, level_id: int) -> PositionExecutorConfig:
         return PositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
             connector_name=self.config.connector_name,
@@ -725,7 +733,7 @@ class BucketsV2Controller(ControllerBase):
             position_mode=self.position_mode,
         )
 
-    def get_market_entry_executor_config(self, qty: Decimal, level_id: int) -> PositionExecutorConfig:
+    def get_market_entry_executor_config(self, qty: float, level_id: int) -> PositionExecutorConfig:
         return PositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
             connector_name=self.config.connector_name,
@@ -744,7 +752,7 @@ class BucketsV2Controller(ControllerBase):
             ),
         )
 
-    def get_exit_executor_config(self, price: Decimal, qty: Decimal, level_id: int) -> PositionExecutorConfig:
+    def get_exit_executor_config(self, price: float, qty: float, level_id: int) -> PositionExecutorConfig:
         return PositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
             connector_name=self.config.connector_name,
@@ -764,9 +772,9 @@ class BucketsV2Controller(ControllerBase):
 
     def reset_buckets(self):
         self.logger().info("RESETTING buckets")
-        self.current_qty: Decimal = Decimal("0.0")
-        self.start_price: Decimal = self.get_last_trade_price()
-        self.avg_entry_price: Decimal = self.start_price
+        self.current_qty = 0.0
+        self.start_price = self.get_last_trade_price()
+        self.avg_entry_price = self.start_price
         self.entry_buckets = {}
         self.exit_buckets = {}
         self.is_last_exit_bucket_filled = False
