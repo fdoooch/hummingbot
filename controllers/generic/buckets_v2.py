@@ -783,7 +783,12 @@ class BucketsV2Controller(ControllerBase):
         self.logger().info("ON STOP")
 
     def to_format_status(self) -> List[str]:
-        table_string = self.create_buckets_table_string(self.entry_buckets | self.exit_buckets)
+        # Check if there are any buckets before creating the table
+        if not self.entry_buckets and not self.exit_buckets:
+            table_string = "No buckets available"
+        else:
+            table_string = self.create_buckets_table_string(self.entry_buckets | self.exit_buckets)
+        
         active_executors = self.active_executors(is_trading=True)  # те, чьи ордера исполнены
         active_executors_placed = self.active_executors(is_trading=False)
         return [
@@ -842,6 +847,10 @@ class BucketsV2Controller(ControllerBase):
             )
             for i, b in buckets.items()
         ]
+        
+        # If there are no buckets, return a message instead of trying to create a table
+        if not bucket_data:
+            return "No buckets available"
 
         # Calculate column widths - compare header with longest data in each column
         col_widths = [max(len(header), max(len(row[i]) for row in bucket_data)) + 2 for i, header in enumerate(headers)]
