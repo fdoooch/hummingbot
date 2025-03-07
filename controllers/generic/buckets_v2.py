@@ -207,6 +207,8 @@ class BucketsV2ControllerConfig(ControllerConfigBase):
 
 
 class BucketsV2Controller(ControllerBase):
+    inits_count: int = 0
+
     @property
     def state(self) -> Dict[str, Any]:
         return {}
@@ -252,6 +254,8 @@ class BucketsV2Controller(ControllerBase):
         self.is_last_exit_bucket_filled = False
         self._is_new_bucket_filled = False
         self._is_new_entry_bucket_filled = False
+        BucketsV2Controller.inits_count += 1
+        self.logger().info(f"INIT -> Controller initialized: {BucketsV2Controller.inits_count}")
 
     def quantize_price(self, price: float) -> float:
         price_quantized = self.market_data_provider.quantize_order_price(
