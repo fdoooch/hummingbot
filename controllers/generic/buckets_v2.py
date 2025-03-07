@@ -1,4 +1,4 @@
-# from decimal import Decimal
+from decimal import Decimal
 from enum import Enum
 from typing import Any, Dict, List, Set
 from pydantic import BaseModel, Field, validator
@@ -253,6 +253,27 @@ class BucketsV2Controller(ControllerBase):
         self._is_new_bucket_filled = False
         self._is_new_entry_bucket_filled = False
 
+    def quantize_price(self, price: float) -> float:
+        price_quantized = self.market_data_provider.quantize_order_price(
+                self.config.connector_name, self.config.trading_pair, Decimal(str(price))
+            )
+        price_quantized_float = float(price_quantized)
+        if math.isnan(price_quantized_float):
+            self.logger().warning("Quantized price is NaN. Using original price: %s", price)
+            price_quantized_float = price
+        return price_quantized_float
+
+    def quantize_qty(self, qty: float) -> float:
+        qty_quantized = self.market_data_provider.quantize_order_amount(
+                self.config.connector_name, self.config.trading_pair, Decimal(str(qty))
+            )
+        qty_quantized_float = float(qty_quantized)
+        if math.isnan(qty_quantized_float):
+            self.logger().warning("Quantized qty is NaN. Using original qty: %s", qty)
+            qty_quantized_float = qty
+        return qty_quantized_float
+
+
     def sort_config_entry_buckets(self, buckets: list[EntryBucket], trade_side: TradeType) -> list[EntryBucket]:
         return buckets
 
@@ -279,13 +300,9 @@ class BucketsV2Controller(ControllerBase):
             else:
                 price = self.avg_entry_price * (1 + bucket.drawdown_percentage / 100)
 
-            price_quantized = self.market_data_provider.quantize_order_price(
-                self.config.connector_name, self.config.trading_pair, price
-            )
+            price_quantized = self.quantize_price(price)
             qty = bucket.amount * self.config.leverage / price_quantized
-            qty_quantized = self.market_data_provider.quantize_order_amount(
-                self.config.connector_name, self.config.trading_pair, qty
-            )
+            qty_quantized = self.quantize_qty(qty)
             amount = qty_quantized * price_quantized
             status = GridBucketStatus.NOT_ACTIVE if amount >= min_amount else GridBucketStatus.SKIPPED
 
@@ -293,7 +310,7 @@ class BucketsV2Controller(ControllerBase):
                 id=bucket.id,
                 price=price_quantized,
                 qty=qty_quantized,
-                amount=qty_quantized * price_quantized,
+                amount=amount,
                 side=self.entry_side,
                 status=status,
                 is_market=False if bucket.drawdown_percentage != 0 else True
@@ -320,16 +337,10 @@ class BucketsV2Controller(ControllerBase):
                 bucket_price = average_entry_price * (1 - bucket.profit_percentage / 100)
             else:
                 bucket_price = average_entry_price * (1 + bucket.profit_percentage / 100)
-            price_quantized = self.market_data_provider.quantize_order_price(
-                connector_name=self.config.connector_name,
-                trading_pair=self.config.trading_pair,
-                price=bucket_price,
-            )
+            price_quantized = self.quantize_price(bucket_price)
 
             qty = bucket.qty_share * available_qty
-            qty_quantized = self.market_data_provider.quantize_order_amount(
-                self.config.connector_name, self.config.trading_pair, qty
-            )
+            qty_quantized = self.quantize_qty(qty)
             amount = qty_quantized * price_quantized
             if amount >= min_amount:
                 status = GridBucketStatus.NOT_ACTIVE
@@ -468,15 +479,11 @@ class BucketsV2Controller(ControllerBase):
     #             time.sleep(1)
 
     def get_last_trade_price(self) -> float:
-        self.last_trade_price = self.market_data_provider.quantize_order_price(
-            self.config.connector_name,
-            self.config.trading_pair,
-            price=self.market_data_provider.get_price_by_type(
+        self.last_trade_price = float(self.market_data_provider.get_price_by_type(
                 self.config.connector_name,
                 self.config.trading_pair,
                 PriceType.LastTrade,
-            ),
-        )
+            ))
         if math.isnan(self.last_trade_price):
             self.last_trade_price = 0.0
 
