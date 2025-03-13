@@ -24,8 +24,8 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
             is_updatable=True,
             prompt_on_new=True,
             prompt=lambda mi: (
-                "Enter candle configs in format 'exchange1.tp1.interval1.max_records:"
-                "exchange2.tp2.interval2.max_records':"
+                "Enter candle configs in format 'exchange1.tp1.interval1.max_records':"
+                "'exchange2.tp2.interval2.max_records'"
             )
         )
     )
@@ -133,10 +133,12 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
 
     
     def update_markets(self, markets: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
-        markets = {
-            self.first_pair.connector_name: {self.first_pair.trading_pair},
-            self.second_pair.connector_name: {self.second_pair.trading_pair}
-        }
+        if self.connector_one not in markets: 
+            markets[self.connector_one] = set()
+        markets[self.connector_one].add(self.trading_pair_one)
+        if self.connector_two not in markets:
+            markets[self.connector_two] = set()
+        markets[self.connector_two].add(self.trading_pair_two)
         return markets
 
 
@@ -194,6 +196,15 @@ class RatioArbitrageControllerV1(ControllerBase):
 
 
     def calculate_regression_coef(self, closing_prices_one: np.ndarray, closing_prices_two: np.ndarray) ->np.ndarray:
+        # Log the lengths of the closing prices
+        self.logger().info(f"Length of closing_prices_one: {len(closing_prices_one)}")
+        self.logger().info(f"Length of closing_prices_two: {len(closing_prices_two)}")
+
+        # Check if any of the arrays are empty
+        if len(closing_prices_one) == 0 or len(closing_prices_two) == 0:
+            self.logger().error("One or both of the closing prices arrays are empty. Skipping regression calculation.")
+            return np.array([0, 0])  # Return default coefficients or handle as needed
+
         # Считаем линейную регрессию
         regression_coef: np.ndarray = np.polyfit(closing_prices_one, closing_prices_two, deg=1)
         return regression_coef
@@ -205,7 +216,7 @@ class RatioArbitrageControllerV1(ControllerBase):
         pair_two = price_two
         ratio = pair_one / pair_two
         self.pair_one_normalized_price = pair_one
-        return ratio
+        return round(ratio, 3)
         
 
     def create_position_config(self, trading_pair: str, side: TradeType, amount_quote: Decimal, 
@@ -318,7 +329,6 @@ class RatioArbitrageControllerV1(ControllerBase):
 
     async def update_processed_data(self):
         """Update any processed data needed by the controller"""
-        self.logger().info("Updating processed data...")
         if self._is_first_tick:
             self.logger().info("First tick detected, starting controller...")
             self._is_first_tick = False
@@ -340,19 +350,17 @@ class RatioArbitrageControllerV1(ControllerBase):
 
     def to_format_status(self) -> List[str]:
         """Format the current status for display"""
-        status = {
-            "Pair 1 Price": self.pair_one_mid_price,
-            "Pair 2 Price": self.pair_two_mid_price,
-            "Ratio": self._current_ratio,
-            "Pair 1 Normalized Price": self.pair_one_normalized_price,
-            "Open Long Threshold": float(self.config.open_long_threshold),
-            "Open Short Threshold": float(self.config.open_short_threshold),
-            "Close Long Threshold": float(self.config.close_long_threshold),
-            "Close Short Threshold": float(self.config.close_short_threshold),
-            "Active Pair 1 Long": self._active_first_pair_long,
-            "Active Pair 1 Short": self._active_first_pair_short
-        }
-        self.logger().info(f"Status: {status}")
-        df = pd.DataFrame([status])
-        return "STATUS: STATUS"
-        return [format_df_for_printout(df, table_format="psql")]
+        status = [
+            f"Pair 1 Price: {self.pair_one_mid_price}",
+            f"Pair 2 Price: {self.pair_two_mid_price}",
+            f"Ratio: {self._current_ratio}",
+            f"Pair 1 Normalized Price: {self.pair_one_normalized_price}",
+            f"Open Long Threshold: {self.config.open_long_threshold}",
+            f"Open Short Threshold: {self.config.open_short_threshold}",
+            f"Close Long Threshold: {self.config.close_long_threshold}",
+            f"Close Short Threshold: {self.config.close_short_threshold}",
+            f"Active Pair 1 Long: {self._active_first_pair_long}",
+            f"Active Pair 1 Short: {self._active_first_pair_short}"
+        ]
+       
+        return status
