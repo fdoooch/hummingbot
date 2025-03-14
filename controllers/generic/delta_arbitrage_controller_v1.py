@@ -3,6 +3,8 @@ from typing import Dict, List, Set
 from pydantic import Field, validator
 import math
 import time
+import csv
+import os
 
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.core.data_type.common import PriceType
@@ -25,85 +27,54 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
             prompt=lambda mi: (
                 "Enter candle configs in format 'exchange1.tp1.interval1.max_records':"
                 "'exchange2.tp2.interval2.max_records'"
-            )
-        )
+            ),
+        ),
     )
     connector_one: str = Field(
         default="bybit_perpetual",
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the connector ONE: ",
-            prompt_on_new=True
-        ))
+        client_data=ClientFieldData(prompt=lambda e: "Enter the connector ONE: ", prompt_on_new=True),
+    )
     trading_pair_one: str = Field(
         default="BTC-USDT",
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the trading pair ONE: ",
-            prompt_on_new=True
-        ))
+        client_data=ClientFieldData(prompt=lambda e: "Enter the trading pair ONE: ", prompt_on_new=True),
+    )
     connector_two: str = Field(
         default="bybit_perpetual",
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the connector TWO: ",
-            prompt_on_new=True
-        ))
+        client_data=ClientFieldData(prompt=lambda e: "Enter the connector TWO: ", prompt_on_new=True),
+    )
     trading_pair_two: str = Field(
         default="ETH-USDT",
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the trading pair TWO: ",
-            prompt_on_new=True
-        ))
+        client_data=ClientFieldData(prompt=lambda e: "Enter the trading pair TWO: ", prompt_on_new=True),
+    )
     delta_calculation_interval: str = Field(
         default="1m",
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the regression interval (1m): ",
-            prompt_on_new=True
-        ))
+        client_data=ClientFieldData(prompt=lambda e: "Enter the regression interval (1m): ", prompt_on_new=True),
+    )
     reference_price_window: int = Field(
         default=100,
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the reference price window size: ",
-            prompt_on_new=True
-        ))
+        client_data=ClientFieldData(prompt=lambda e: "Enter the reference price window size: ", prompt_on_new=True),
+    )
 
     # Ratio thresholds
     open_long_threshold: float = Field(
-        default=5.0,
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the open long threshold: ",
-            prompt_on_new=True
-        )
-    )  # UP_VALUE   Buy BTC/Sell ETH when BTC/ETH <= 5 
+        default=5.0, client_data=ClientFieldData(prompt=lambda e: "Enter the open long threshold: ", prompt_on_new=True)
+    )  # UP_VALUE   Buy BTC/Sell ETH when BTC/ETH <= 5
     open_short_threshold: float = Field(
         default=8.0,
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the open short threshold: ",
-            prompt_on_new=True
-        )
+        client_data=ClientFieldData(prompt=lambda e: "Enter the open short threshold: ", prompt_on_new=True),
     )  # Sell BTC/Buy ETH when BTC/ETH >= 6
     close_long_threshold: float = Field(
         default=5.5,
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the close long threshold: ",
-            prompt_on_new=True
-        )
+        client_data=ClientFieldData(prompt=lambda e: "Enter the close long threshold: ", prompt_on_new=True),
     )  # Exit BTC long/ETH short when ratio reaches 5.5
     close_short_threshold: float = Field(
-        default=5,
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the close short threshold: ",
-            prompt_on_new=True
-        )
+        default=5, client_data=ClientFieldData(prompt=lambda e: "Enter the close short threshold: ", prompt_on_new=True)
     )  # Exit BTC short/ETH long when ratio reaches 5.5
     fee_decimal: float = Field(
-        default=0.001,
-        client_data=ClientFieldData(
-            prompt=lambda e: "Enter the fee decimal: ",
-            prompt_on_new=True
-        )
+        default=0.001, client_data=ClientFieldData(prompt=lambda e: "Enter the fee decimal: ", prompt_on_new=True)
     )
 
-
-    @validator('candles_config', pre=True)
+    @validator("candles_config", pre=True)
     def parse_candles_config(cls, v) -> List[CandlesConfig]:
         if isinstance(v, str):
             return cls.parse_candles_config_str(v)
@@ -119,35 +90,34 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
     def parse_fee_decimal(cls, v) -> float:
         return float(v)
 
-
     @staticmethod
     def parse_candles_config_str(v: str) -> List[CandlesConfig]:
         configs = []
         if v.strip():
-            entries = v.split(':')
+            entries = v.split(":")
             for entry in entries:
-                parts = entry.split('.')
+                parts = entry.split(".")
                 if len(parts) != 4:
-                    raise ValueError(f"Invalid candles config format in segment '{entry}'. "
-                                     "Expected format: 'exchange.tradingpair.interval.maxrecords'")
+                    raise ValueError(
+                        f"Invalid candles config format in segment '{entry}'. "
+                        "Expected format: 'exchange.tradingpair.interval.maxrecords'"
+                    )
                 connector, trading_pair, interval, max_records_str = parts
                 try:
                     max_records = int(max_records_str)
                 except ValueError:
-                    raise ValueError(f"Invalid max_records value '{max_records_str}' in segment '{entry}'. "
-                                     "max_records should be an integer.")
+                    raise ValueError(
+                        f"Invalid max_records value '{max_records_str}' in segment '{entry}'. "
+                        "max_records should be an integer."
+                    )
                 config = CandlesConfig(
-                    connector=connector,
-                    trading_pair=trading_pair,
-                    interval=interval,
-                    max_records=max_records
+                    connector=connector, trading_pair=trading_pair, interval=interval, max_records=max_records
                 )
                 configs.append(config)
         return configs
 
-    
     def update_markets(self, markets: Dict[str, Set[str]]) -> Dict[str, Set[str]]:
-        if self.connector_one not in markets: 
+        if self.connector_one not in markets:
             markets[self.connector_one] = set()
         markets[self.connector_one].add(self.trading_pair_one)
         if self.connector_two not in markets:
@@ -181,14 +151,12 @@ class RatioArbitrageControllerV1(ControllerBase):
         self.fee_decimal: float = float(config.fee_decimal)
         self.reference_updated_at: int = int(time.time())
         self.current_amount_quote: float = float(config.total_amount_quote)
-        self.market_data_provider.initialize_rate_sources([ConnectorPair(
-            connector_name=config.connector_one,
-            trading_pair=config.trading_pair_one
-        ), ConnectorPair(
-            connector_name=config.connector_two,
-            trading_pair=config.trading_pair_two
-        )])
-
+        self.market_data_provider.initialize_rate_sources(
+            [
+                ConnectorPair(connector_name=config.connector_one, trading_pair=config.trading_pair_one),
+                ConnectorPair(connector_name=config.connector_two, trading_pair=config.trading_pair_two),
+            ]
+        )
 
     def start(self):
         """
@@ -197,8 +165,6 @@ class RatioArbitrageControllerV1(ControllerBase):
         self.logger().info("Starting Ratio Trading Controller...")
         super().start()
         self.on_new_cycle_start()
-
-
 
     def on_new_cycle_start(self):
         """
@@ -220,28 +186,37 @@ class RatioArbitrageControllerV1(ControllerBase):
         self.update_reference_prices()
         ...
 
-
-
     def update_reference_prices(self):
         """
         Update historical prices for delta calculation
         """
-        df_one = self.market_data_provider.get_candles_df(connector_name=self.config.connector_one,
-                                                          trading_pair=self.config.trading_pair_one,
-                                                          interval=self.config.delta_calculation_interval,
-                                                          max_records=self.config.reference_price_window)
+        df_one = self.market_data_provider.get_candles_df(
+            connector_name=self.config.connector_one,
+            trading_pair=self.config.trading_pair_one,
+            interval=self.config.delta_calculation_interval,
+            max_records=self.config.reference_price_window,
+        )
 
-        df_two = self.market_data_provider.get_candles_df(connector_name=self.config.connector_two,
-                                                          trading_pair=self.config.trading_pair_two,
-                                                          interval=self.config.delta_calculation_interval,
-                                                          max_records=self.config.reference_price_window)
+        df_two = self.market_data_provider.get_candles_df(
+            connector_name=self.config.connector_two,
+            trading_pair=self.config.trading_pair_two,
+            interval=self.config.delta_calculation_interval,
+            max_records=self.config.reference_price_window,
+        )
         self.reference_price_one = df_one["close"].values[0]
         self.reference_price_two = df_two["close"].values[0]
         self.reference_updated_at = int(time.time())
         return None
 
-
-    def calculate_delta_short(self, init_price_one: float, last_price_one: float, init_price_two: float, last_price_two: float, fee_decimal: float, amount_quote: float) -> float:
+    def calculate_delta_short(
+        self,
+        init_price_one: float,
+        last_price_one: float,
+        init_price_two: float,
+        last_price_two: float,
+        fee_decimal: float,
+        amount_quote: float,
+    ) -> float:
 
         pair_one_ratio = last_price_one / init_price_one
         pair_two_ratio = last_price_two / init_price_two
@@ -251,7 +226,12 @@ class RatioArbitrageControllerV1(ControllerBase):
         return delta - fee
 
     def is_open_short_conditions(self) -> bool:
-        if self.reference_price_one == 0 or self.reference_price_two == 0 or self.pair_one_current_price == 0 or self.pair_two_current_price == 0:
+        if (
+            self.reference_price_one == 0
+            or self.reference_price_two == 0
+            or self.pair_one_current_price == 0
+            or self.pair_two_current_price == 0
+        ):
             return False
 
         delta = self.calculate_delta_short(
@@ -260,11 +240,10 @@ class RatioArbitrageControllerV1(ControllerBase):
             init_price_two=self.reference_price_two,
             last_price_two=self.pair_two_current_price,
             fee_decimal=self.fee_decimal,
-            amount_quote=self.current_amount_quote
+            amount_quote=self.current_amount_quote,
         )
         self._reference_short_delta = delta
         return delta > self.config.open_short_threshold
-
 
     def is_close_short_conditions(self) -> bool:
 
@@ -274,14 +253,18 @@ class RatioArbitrageControllerV1(ControllerBase):
             init_price_two=self._open_short_price_two,
             last_price_two=self.pair_two_current_price,
             fee_decimal=self.fee_decimal,
-            amount_quote=self.current_amount_quote
+            amount_quote=self.current_amount_quote,
         )
         self._current_short_delta = delta
         return delta > self.config.close_short_threshold
-    
 
-    def create_position_config(self, trading_pair: str, side: TradeType, amount_quote: Decimal, 
-                               position_action: PositionAction = PositionAction.OPEN) -> PositionExecutorConfig:
+    def create_position_config(
+        self,
+        trading_pair: str,
+        side: TradeType,
+        amount_quote: Decimal,
+        position_action: PositionAction = PositionAction.OPEN,
+    ) -> PositionExecutorConfig:
         """Create a position executor configuration"""
         return PositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
@@ -295,7 +278,6 @@ class RatioArbitrageControllerV1(ControllerBase):
             time_limit_seconds=self.config.time_limit_seconds if position_action == PositionAction.OPEN else None,
             connector_name=self.config.first_pair.connector_name,  # Both pairs use same connector (Binance)
         )
-
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """Determine what positions to open based on the BTC/ETH ratio"""
@@ -314,76 +296,76 @@ class RatioArbitrageControllerV1(ControllerBase):
                 self.config.first_pair.trading_pair,
                 TradeType.SELL,  # Close long with sell
                 self.config.amount_quote_btc,
-                position_action=PositionAction.CLOSE
+                position_action=PositionAction.CLOSE,
             )
             eth_config = self.create_position_config(
                 self.config.second_pair.trading_pair,
-                TradeType.BUY,   # Close short with buy
+                TradeType.BUY,  # Close short with buy
                 self.config.amount_quote_eth,
-                position_action=PositionAction.CLOSE
+                position_action=PositionAction.CLOSE,
             )
-            executor_actions.extend([
-                CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
-                CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id)
-            ])
+            executor_actions.extend(
+                [
+                    CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
+                    CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
+                ]
+            )
             self._active_first_pair_long = False
 
         elif self._active_first_pair_short and self._current_ratio <= self.config.exit_short_ratio:
             # Close BTC short and ETH long positions
             btc_config = self.create_position_config(
                 self.config.first_pair.trading_pair,
-                TradeType.BUY,   # Close short with buy
+                TradeType.BUY,  # Close short with buy
                 self.config.amount_quote_btc,
-                position_action=PositionAction.CLOSE
+                position_action=PositionAction.CLOSE,
             )
             eth_config = self.create_position_config(
                 self.config.second_pair.trading_pair,
                 TradeType.SELL,  # Close long with sell
                 self.config.amount_quote_eth,
-                position_action=PositionAction.CLOSE
+                position_action=PositionAction.CLOSE,
             )
-            executor_actions.extend([
-                CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
-                CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id)
-            ])
+            executor_actions.extend(
+                [
+                    CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
+                    CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
+                ]
+            )
             self._active_first_pair_short = False
 
         # Check for entry conditions
         elif self._current_ratio <= self.config.lower_ratio and not self._active_first_pair_long:
             # Buy BTC and Sell ETH when ratio <= 5
             btc_config = self.create_position_config(
-                self.config.first_pair.trading_pair,
-                TradeType.BUY,
-                self.config.amount_quote_btc
+                self.config.first_pair.trading_pair, TradeType.BUY, self.config.amount_quote_btc
             )
             eth_config = self.create_position_config(
-                self.config.second_pair.trading_pair,
-                TradeType.SELL,
-                self.config.amount_quote_eth
+                self.config.second_pair.trading_pair, TradeType.SELL, self.config.amount_quote_eth
             )
-            executor_actions.extend([
-                CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
-                CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id)
-            ])
+            executor_actions.extend(
+                [
+                    CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
+                    CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
+                ]
+            )
             self._active_first_pair_long = True
             self._active_first_pair_short = False
 
         elif self._current_ratio >= self.config.upper_ratio and not self._active_first_pair_short:
             # Sell BTC and Buy ETH when ratio >= 6
             btc_config = self.create_position_config(
-                self.config.first_pair.trading_pair,
-                TradeType.SELL,
-                self.config.amount_quote_btc
+                self.config.first_pair.trading_pair, TradeType.SELL, self.config.amount_quote_btc
             )
             eth_config = self.create_position_config(
-                self.config.second_pair.trading_pair,
-                TradeType.BUY,
-                self.config.amount_quote_eth
+                self.config.second_pair.trading_pair, TradeType.BUY, self.config.amount_quote_eth
             )
-            executor_actions.extend([
-                CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
-                CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id)
-            ])
+            executor_actions.extend(
+                [
+                    CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
+                    CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
+                ]
+            )
             self._active_first_pair_short = True
             self._active_first_pair_long = False
 
@@ -402,8 +384,16 @@ class RatioArbitrageControllerV1(ControllerBase):
             self.update_reference_prices()
 
         # Получить свежие цены current_price_one и current_price_two
-        self.pair_one_current_price = float(self.market_data_provider.get_price_by_type(self.config.connector_one, self.config.trading_pair_one, PriceType.LastTrade))
-        self.pair_two_current_price = float(self.market_data_provider.get_price_by_type(self.config.connector_two, self.config.trading_pair_two, PriceType.LastTrade))
+        self.pair_one_current_price = float(
+            self.market_data_provider.get_price_by_type(
+                self.config.connector_one, self.config.trading_pair_one, PriceType.LastTrade
+            )
+        )
+        self.pair_two_current_price = float(
+            self.market_data_provider.get_price_by_type(
+                self.config.connector_two, self.config.trading_pair_two, PriceType.LastTrade
+            )
+        )
 
         if self._active_first_pair_short:
             if self.is_close_short_conditions():
@@ -411,10 +401,10 @@ class RatioArbitrageControllerV1(ControllerBase):
 
         elif self.is_open_short_conditions():
             self.open_short()
+        
+        save_controller_state_to_file(self)
 
         return None
-
-
 
     def open_short(self):
         self._open_short_price_one = self.pair_one_current_price
@@ -427,7 +417,6 @@ class RatioArbitrageControllerV1(ControllerBase):
         self._open_short_price_two = 0.0
         self._current_short_delta = 0.0
         self._active_first_pair_short = False
-
 
     def to_format_status(self) -> List[str]:
         """Format the current status for display"""
@@ -447,7 +436,63 @@ class RatioArbitrageControllerV1(ControllerBase):
             f"Close Long Threshold: {self.config.close_long_threshold}",
             f"Close Short Threshold: {self.config.close_short_threshold}",
             f"Active Pair 1 Long: {self._active_first_pair_long}",
-            f"Active Pair 1 Short: {self._active_first_pair_short}"
+            f"Active Pair 1 Short: {self._active_first_pair_short}",
         ]
-       
+
         return status
+
+
+def save_controller_state_to_file(controller: RatioArbitrageControllerV1):
+    filename = f"controller_state_history_{controller.config.controller_name}.csv"
+    headers = [
+        "timestamp",
+        "pair_one",
+        "pair_one_price",
+        "pair_two",
+        "pair_two_price",
+        "reference_price_one",
+        "reference_price_two",
+        "reference_updated_at",
+        "short_delta",
+        "reference_short_delta",
+        "long_delta",
+        "reference_long_delta",
+        "active_long",
+        "active_short",
+        "open_long_threshold",
+        "open_short_threshold",
+        "close_long_threshold",
+        "close_short_threshold",
+    ]
+
+    row = {
+        "timestamp": controller.market_data_provider.time(),
+        "pair_one": controller.config.trading_pair_one,
+        "pair_one_price": controller.pair_one_current_price,
+        "pair_two": controller.config.trading_pair_two,
+        "pair_two_price": controller.pair_two_current_price,
+        "reference_price_one": controller.reference_price_one,
+        "reference_price_two": controller.reference_price_two,
+        "reference_updated_at": controller.reference_updated_at,
+        "short_delta": controller._current_short_delta,
+        "reference_short_delta": controller._reference_short_delta,
+        "long_delta": controller._current_long_delta,
+        "reference_long_delta": controller._reference_long_delta,
+        "active_long": controller._active_first_pair_long,
+        "active_short": controller._active_first_pair_short,
+        "open_long_threshold": controller.config.open_long_threshold,
+        "open_short_threshold": controller.config.open_short_threshold,
+        "close_long_threshold": controller.config.close_long_threshold,
+        "close_short_threshold": controller.config.close_short_threshold,
+    }
+    if not os.path.exists(filename):
+        with open(filename, "w") as f:
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerow(row.values())
+    else:
+        with open(filename, "a") as f:
+            writer = csv.writer(f)
+            writer.writerow(row.values())
+
+
