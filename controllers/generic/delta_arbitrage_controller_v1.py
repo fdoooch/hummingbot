@@ -2,8 +2,8 @@ from decimal import Decimal
 from typing import Dict, List, Set
 from pydantic import Field, validator
 import math
+import time
 
-from hummingbot.client.ui.interface_utils import format_df_for_printout
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.core.data_type.common import PriceType
 from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
@@ -12,7 +12,6 @@ from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction,
 from hummingbot.core.data_type.common import OrderType, PositionAction, TradeType
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.client.config.config_data_types import ClientFieldData
-import pandas as pd
 import numpy as np
 
 
@@ -53,16 +52,16 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
             prompt=lambda e: "Enter the trading pair TWO: ",
             prompt_on_new=True
         ))
-    regression_interval: str = Field(
+    delta_calculation_interval: str = Field(
         default="1m",
         client_data=ClientFieldData(
             prompt=lambda e: "Enter the regression interval (1m): ",
             prompt_on_new=True
         ))
-    regression_window: int = Field(
-        default=1000,
+    reference_price_window: int = Field(
+        default=100,
         client_data=ClientFieldData(
-            prompt=lambda e: "Enter the regression window size: ",
+            prompt=lambda e: "Enter the reference price window size: ",
             prompt_on_new=True
         ))
 
@@ -89,12 +88,19 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
         )
     )  # Exit BTC long/ETH short when ratio reaches 5.5
     close_short_threshold: float = Field(
-        default=5.5,
+        default=5,
         client_data=ClientFieldData(
             prompt=lambda e: "Enter the close short threshold: ",
             prompt_on_new=True
         )
     )  # Exit BTC short/ETH long when ratio reaches 5.5
+    fee_decimal: float = Field(
+        default=0.001,
+        client_data=ClientFieldData(
+            prompt=lambda e: "Enter the fee decimal: ",
+            prompt_on_new=True
+        )
+    )
 
 
     @validator('candles_config', pre=True)
@@ -104,6 +110,14 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
         elif isinstance(v, list):
             return v
         raise ValueError("Invalid type for candles_config. Expected str or List[CandlesConfig]")
+
+    @validator("total_amount_quote", pre=True)
+    def parse_total_amount_quote(cls, v) -> float:
+        return float(v)
+
+    @validator("fee_decimal", pre=True)
+    def parse_fee_decimal(cls, v) -> float:
+        return float(v)
 
 
     @staticmethod
@@ -151,9 +165,22 @@ class RatioArbitrageControllerV1(ControllerBase):
         self._active_first_pair_short = False
         self._is_first_tick = True
         self.regression_coef: np.ndarray = np.array([])
-        self.pair_one_mid_price: float = 0.0
-        self.pair_two_mid_price: float = 0.0
+        self.pair_one_current_price: float = 0.0
+        self.pair_two_current_price: float = 0.0
         self._current_ratio: float = 0.0
+        self.reference_price_one: float = 0.0
+        self.reference_price_two: float = 0.0
+        self._open_short_price_one: float = 0.0
+        self._open_short_price_two: float = 0.0
+        self._open_long_price_one: float = 0.0
+        self._open_long_price_two: float = 0.0
+        self._current_short_delta: float = 0.0
+        self._reference_short_delta: float = 0.0
+        self._current_long_delta: float = 0.0
+        self._reference_long_delta: float = 0.0
+        self.fee_decimal: float = float(config.fee_decimal)
+        self.reference_updated_at: int = int(time.time())
+        self.current_amount_quote: float = float(config.total_amount_quote)
         self.market_data_provider.initialize_rate_sources([ConnectorPair(
             connector_name=config.connector_one,
             trading_pair=config.trading_pair_one
@@ -161,7 +188,6 @@ class RatioArbitrageControllerV1(ControllerBase):
             connector_name=config.connector_two,
             trading_pair=config.trading_pair_two
         )])
-
 
 
     def start(self):
@@ -179,45 +205,80 @@ class RatioArbitrageControllerV1(ControllerBase):
         Цикл завершается по времени или после первой закрытой сделки
         """
         # TODO: Получить 1000 минутных свечей для trading_pair_one и trading_pair_two
+        # df_one = self.market_data_provider.get_candles_df(connector_name=self.config.connector_one,
+        #                                                   trading_pair=self.config.trading_pair_one,
+        #                                                   interval=self.config.delta_calculation_interval,
+        #                                                   max_records=self.config.reference_price_window)
+
+        # df_two = self.market_data_provider.get_candles_df(connector_name=self.config.connector_two,
+        #                                                   trading_pair=self.config.trading_pair_two,
+        #                                                   interval=self.config.delta_calculation_interval,
+        #                                                   max_records=self.config.reference_price_window)
+
+        # pair_1_closing_prices = df_one["close"].values
+        # pair_2_closing_prices = df_two["close"].values
+        self.update_reference_prices()
+        ...
+
+
+
+    def update_reference_prices(self):
+        """
+        Update historical prices for delta calculation
+        """
         df_one = self.market_data_provider.get_candles_df(connector_name=self.config.connector_one,
                                                           trading_pair=self.config.trading_pair_one,
-                                                          interval=self.config.regression_interval,
-                                                          max_records=self.config.regression_window)
+                                                          interval=self.config.delta_calculation_interval,
+                                                          max_records=self.config.reference_price_window)
 
         df_two = self.market_data_provider.get_candles_df(connector_name=self.config.connector_two,
                                                           trading_pair=self.config.trading_pair_two,
-                                                          interval=self.config.regression_interval,
-                                                          max_records=self.config.regression_window)
-
-        pair_1_closing_prices = df_one["close"].values
-        pair_2_closing_prices = df_two["close"].values
-        self.regression_coef = self.calculate_regression_coef(pair_1_closing_prices, pair_2_closing_prices)
-
-
-
-    def calculate_regression_coef(self, closing_prices_one: np.ndarray, closing_prices_two: np.ndarray) ->np.ndarray:
-        # Log the lengths of the closing prices
-        self.logger().info(f"Length of closing_prices_one: {len(closing_prices_one)}")
-        self.logger().info(f"Length of closing_prices_two: {len(closing_prices_two)}")
-
-        # Check if any of the arrays are empty
-        if len(closing_prices_one) == 0 or len(closing_prices_two) == 0:
-            self.logger().error("One or both of the closing prices arrays are empty. Skipping regression calculation.")
-            return np.array([0, 0])  # Return default coefficients or handle as needed
-
-        # Считаем линейную регрессию
-        regression_coef: np.ndarray = np.polyfit(closing_prices_one, closing_prices_two, deg=1)
-        return regression_coef
+                                                          interval=self.config.delta_calculation_interval,
+                                                          max_records=self.config.reference_price_window)
+        self.reference_price_one = df_one["close"].values[0]
+        self.reference_price_two = df_two["close"].values[0]
+        self.reference_updated_at = int(time.time())
+        return None
 
 
-    def get_ratio(self, price_one: float, price_two: float) -> float:
-        """Calculate current ratio"""
-        pair_one = price_one * self.regression_coef[0] + self.regression_coef[1]
-        pair_two = price_two
-        ratio = pair_one / pair_two
-        self.pair_one_normalized_price = pair_one
-        return round(ratio, 3)
-        
+    def calculate_delta_short(self, init_price_one: float, last_price_one: float, init_price_two: float, last_price_two: float, fee_decimal: float, amount_quote: float) -> float:
+
+        pair_one_ratio = last_price_one / init_price_one
+        pair_two_ratio = last_price_two / init_price_two
+
+        delta = -amount_quote * (pair_one_ratio - pair_two_ratio)
+        fee = fee_decimal * amount_quote * (pair_one_ratio + pair_two_ratio + 2)
+        return delta - fee
+
+    def is_open_short_conditions(self) -> bool:
+        if self.reference_price_one == 0 or self.reference_price_two == 0 or self.pair_one_current_price == 0 or self.pair_two_current_price == 0:
+            return False
+
+        delta = self.calculate_delta_short(
+            init_price_one=self.reference_price_one,
+            last_price_one=self.pair_one_current_price,
+            init_price_two=self.reference_price_two,
+            last_price_two=self.pair_two_current_price,
+            fee_decimal=self.fee_decimal,
+            amount_quote=self.current_amount_quote
+        )
+        self._reference_short_delta = delta
+        return delta > self.config.open_short_threshold
+
+
+    def is_close_short_conditions(self) -> bool:
+
+        delta = self.calculate_delta_short(
+            init_price_one=self._open_short_price_one,
+            last_price_one=self.pair_one_current_price,
+            init_price_two=self._open_short_price_two,
+            last_price_two=self.pair_two_current_price,
+            fee_decimal=self.fee_decimal,
+            amount_quote=self.current_amount_quote
+        )
+        self._current_short_delta = delta
+        return delta > self.config.close_short_threshold
+    
 
     def create_position_config(self, trading_pair: str, side: TradeType, amount_quote: Decimal, 
                                position_action: PositionAction = PositionAction.OPEN) -> PositionExecutorConfig:
@@ -234,6 +295,7 @@ class RatioArbitrageControllerV1(ControllerBase):
             time_limit_seconds=self.config.time_limit_seconds if position_action == PositionAction.OPEN else None,
             connector_name=self.config.first_pair.connector_name,  # Both pairs use same connector (Binance)
         )
+
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """Determine what positions to open based on the BTC/ETH ratio"""
@@ -335,26 +397,51 @@ class RatioArbitrageControllerV1(ControllerBase):
             self.on_new_cycle_start()
             return None
 
-        # Получить свежие цены current_price_one и current_price_two
-        self.pair_one_mid_price = float(self.market_data_provider.get_price_by_type(self.config.connector_one, self.config.trading_pair_one, PriceType.MidPrice))
-        self.pair_two_mid_price = float(self.market_data_provider.get_price_by_type(self.config.connector_two, self.config.trading_pair_two, PriceType.MidPrice))
+        time_since_reference = int(time.time()) - self.reference_updated_at
+        if time_since_reference > 60:
+            self.update_reference_prices()
 
-        if math.isnan(self.pair_one_mid_price) or math.isnan(self.pair_two_mid_price):
-            return None
-        
-        self._current_ratio = self.get_ratio(self.pair_one_mid_price, self.pair_two_mid_price)
-        ...
-        # TODO: Расчёт сигналов на вход и выход
-        signal_long = self._current_ratio <= self.config.open_long_threshold
-        signal_short = self._current_ratio >= self.config.open_short_threshold
+        # Получить свежие цены current_price_one и current_price_two
+        self.pair_one_current_price = float(self.market_data_provider.get_price_by_type(self.config.connector_one, self.config.trading_pair_one, PriceType.LastTrade))
+        self.pair_two_current_price = float(self.market_data_provider.get_price_by_type(self.config.connector_two, self.config.trading_pair_two, PriceType.LastTrade))
+
+        if self._active_first_pair_short:
+            if self.is_close_short_conditions():
+                self.exit_short()
+
+        elif self.is_open_short_conditions():
+            self.open_short()
+
+        return None
+
+
+
+    def open_short(self):
+        self._open_short_price_one = self.pair_one_current_price
+        self._open_short_price_two = self.pair_two_current_price
+        self._active_first_pair_short = True
+        self._active_first_pair_long = False
+
+    def exit_short(self):
+        self._open_short_price_one = 0.0
+        self._open_short_price_two = 0.0
+        self._current_short_delta = 0.0
+        self._active_first_pair_short = False
+
 
     def to_format_status(self) -> List[str]:
         """Format the current status for display"""
         status = [
-            f"Pair 1 Price: {self.pair_one_mid_price}",
-            f"Pair 2 Price: {self.pair_two_mid_price}",
-            f"Ratio: {self._current_ratio}",
-            f"Pair 1 Normalized Price: {self.pair_one_normalized_price}",
+            f"Pair 1 Price: {self.pair_one_current_price}",
+            f"Reference Price One: {self.reference_price_one}",
+            f"Pair 2 Price: {self.pair_two_current_price}",
+            f"Reference Price Two: {self.reference_price_two}",
+            f"Reference Updated At: {self.reference_updated_at}",
+            f"Short Delta: {self._current_short_delta}",
+            f"Reference Short Delta: {self._reference_short_delta}",
+            f"Long Delta: {self._current_long_delta}",
+            f"Reference Long Delta: {self._reference_long_delta}",
+            # f"Pair 1 Normalized Price: {self.pair_one_normalized_price}",
             f"Open Long Threshold: {self.config.open_long_threshold}",
             f"Open Short Threshold: {self.config.open_short_threshold}",
             f"Close Long Threshold: {self.config.close_long_threshold}",
