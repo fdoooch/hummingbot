@@ -443,7 +443,7 @@ class RatioArbitrageControllerV1(ControllerBase):
 
 
 def save_controller_state_to_file(controller: RatioArbitrageControllerV1):
-    filename = f"controller_state_history_{controller.config.controller_name}.csv"
+    filename = f"logs/controller_state_history_{controller.config.controller_name}_{controller.config.connector_one}.csv"
     headers = [
         "timestamp",
         "pair_one",
