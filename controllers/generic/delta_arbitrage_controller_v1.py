@@ -402,6 +402,7 @@ class RatioArbitrageControllerV1(ControllerBase):
         elif self.is_open_short_conditions():
             self.open_short()
         
+        self.logger().info("Saving controller state to file...")
         save_controller_state_to_file(self)
 
         return None
@@ -443,7 +444,9 @@ class RatioArbitrageControllerV1(ControllerBase):
 
 
 def save_controller_state_to_file(controller: RatioArbitrageControllerV1):
+    controller.logger().info("Saving controller state to file...")
     filename = f"logs/controller_state_history_{controller.config.controller_name}_{controller.config.connector_one}.csv"
+    controller.logger().info(f"Saving controller state to file: {filename}")
     headers = [
         "timestamp",
         "pair_one",
