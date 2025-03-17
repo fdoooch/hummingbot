@@ -17,8 +17,8 @@ from hummingbot.client.config.config_data_types import ClientFieldData
 import numpy as np
 
 
-class RatioArbitrageControllerV1Config(ControllerConfigBase):
-    controller_name: str = "ratio_arbitrage_controller_v1"
+class DeltaArbitrageControllerV1Config(ControllerConfigBase):
+    controller_name: str = "delta_arbitrage_controller_v1"
     candles_config: List[CandlesConfig] = Field(
         default="bybit_perpetual.BTC-USDT.1m.1000:bybit_perpetual.ETH-USDT.1m.1000:",
         client_data=ClientFieldData(
@@ -54,22 +54,19 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
         default=100,
         client_data=ClientFieldData(prompt=lambda e: "Enter the reference price window size: ", prompt_on_new=True),
     )
+    position_max_duration_sec: int = Field(
+        default=60000,
+        client_data=ClientFieldData(prompt=lambda e: "Enter the period to close position by timeout in seconds (60000): ", prompt_on_new=True),
+    )
 
     # Ratio thresholds
-    open_long_threshold: float = Field(
-        default=5.0, client_data=ClientFieldData(prompt=lambda e: "Enter the open long threshold: ", prompt_on_new=True)
-    )  # UP_VALUE   Buy BTC/Sell ETH when BTC/ETH <= 5
-    open_short_threshold: float = Field(
+    open_position_threshold: float = Field(
         default=8.0,
         client_data=ClientFieldData(prompt=lambda e: "Enter the open short threshold: ", prompt_on_new=True),
-    )  # Sell BTC/Buy ETH when BTC/ETH >= 6
-    close_long_threshold: float = Field(
-        default=5.5,
-        client_data=ClientFieldData(prompt=lambda e: "Enter the close long threshold: ", prompt_on_new=True),
-    )  # Exit BTC long/ETH short when ratio reaches 5.5
-    close_short_threshold: float = Field(
-        default=5, client_data=ClientFieldData(prompt=lambda e: "Enter the close short threshold: ", prompt_on_new=True)
-    )  # Exit BTC short/ETH long when ratio reaches 5.5
+    )  # Sell BTC/Buy ETH when BTC/ETH >= 8
+    close_position_threshold: float = Field(
+        default=5.0, client_data=ClientFieldData(prompt=lambda e: "Enter the close short threshold: ", prompt_on_new=True)
+    )  # Exit BTC short/ETH long when ratio reaches <=5
     fee_decimal: float = Field(
         default=0.001, client_data=ClientFieldData(prompt=lambda e: "Enter the fee decimal: ", prompt_on_new=True)
     )
@@ -126,31 +123,32 @@ class RatioArbitrageControllerV1Config(ControllerConfigBase):
         return markets
 
 
-class RatioArbitrageControllerV1(ControllerBase):
-    def __init__(self, config: RatioArbitrageControllerV1Config, *args, **kwargs):
-        self.logger().warning(f"Initializing Ratio Arbitrage Controller with config: {config}")
+class DeltaArbitrageControllerV1(ControllerBase):
+    def __init__(self, config: DeltaArbitrageControllerV1Config, *args, **kwargs):
+        self.logger().warning(f"Initializing Delta Arbitrage Controller with config: {config}")
         super().__init__(config, *args, **kwargs)
         self.config = config
-        self._active_first_pair_long = False
-        self._active_first_pair_short = False
+        # self.config.position_max_duration_sec = 1000 * 60 # 1000 minutes
+        self._has_active_position = False
         self._is_first_tick = True
-        self.regression_coef: np.ndarray = np.array([])
         self.pair_one_current_price: float = 0.0
         self.pair_two_current_price: float = 0.0
         self._current_ratio: float = 0.0
         self.reference_price_one: float = 0.0
         self.reference_price_two: float = 0.0
-        self._open_short_price_one: float = 0.0
-        self._open_short_price_two: float = 0.0
-        self._open_long_price_one: float = 0.0
-        self._open_long_price_two: float = 0.0
-        self._current_short_delta: float = 0.0
-        self._reference_short_delta: float = 0.0
-        self._current_long_delta: float = 0.0
-        self._reference_long_delta: float = 0.0
+        self._position_open_price_one: float = 0.0
+        self._position_open_price_two: float = 0.0
+        self._current_delta: float = 0.0
+        self._reference_delta: float = 0.0
         self.fee_decimal: float = float(config.fee_decimal)
-        self.reference_updated_at: int = int(time.time())
+        self._reference_prices_updated_at: int = 0
+        self._reference_delta_updated_at: int = 0
         self.current_amount_quote: float = float(config.total_amount_quote)
+        self._current_position_opened_at: int = 0
+        self.cumulative_delta: float = 0.0
+        self._total_positions_opened_count: int = 0
+        self._total_positions_closed_count: int = 0
+        self._positions_closed_by_timeout_count: int = 0
         self.market_data_provider.initialize_rate_sources(
             [
                 ConnectorPair(connector_name=config.connector_one, trading_pair=config.trading_pair_one),
@@ -170,43 +168,69 @@ class RatioArbitrageControllerV1(ControllerBase):
         """
         Цикл завершается по времени или после первой закрытой сделки
         """
-        # TODO: Получить 1000 минутных свечей для trading_pair_one и trading_pair_two
-        # df_one = self.market_data_provider.get_candles_df(connector_name=self.config.connector_one,
-        #                                                   trading_pair=self.config.trading_pair_one,
-        #                                                   interval=self.config.delta_calculation_interval,
-        #                                                   max_records=self.config.reference_price_window)
+        current_time = int(time.time())
+        self._current_position_opened_at = 0
+        self.update_reference_data(current_time)
+        return None
 
-        # df_two = self.market_data_provider.get_candles_df(connector_name=self.config.connector_two,
-        #                                                   trading_pair=self.config.trading_pair_two,
-        #                                                   interval=self.config.delta_calculation_interval,
-        #                                                   max_records=self.config.reference_price_window)
-
-        # pair_1_closing_prices = df_one["close"].values
-        # pair_2_closing_prices = df_two["close"].values
-        self.update_reference_prices()
-        ...
-
-    def update_reference_prices(self):
+    def update_reference_data(self, current_time: int):
         """
         Update historical prices for delta calculation
         """
-        df_one = self.market_data_provider.get_candles_df(
+        self._reference_delta = self.calculate_reference_delta()
+        self._reference_delta_updated_at = current_time
+        
+        REFERENCE_DELTA_UPDATE_INTERVAL = 60
+        time_since_reference_updated = current_time - self._reference_prices_updated_at
+        if time_since_reference_updated <= REFERENCE_DELTA_UPDATE_INTERVAL:
+            return None
+
+        ohlcv_df_one = self.market_data_provider.get_candles_df(
             connector_name=self.config.connector_one,
             trading_pair=self.config.trading_pair_one,
             interval=self.config.delta_calculation_interval,
             max_records=self.config.reference_price_window,
         )
 
-        df_two = self.market_data_provider.get_candles_df(
+        ohlcv_df_two = self.market_data_provider.get_candles_df(
             connector_name=self.config.connector_two,
             trading_pair=self.config.trading_pair_two,
             interval=self.config.delta_calculation_interval,
             max_records=self.config.reference_price_window,
         )
-        self.reference_price_one = df_one["close"].values[0]
-        self.reference_price_two = df_two["close"].values[0]
-        self.reference_updated_at = int(time.time())
+        self.reference_price_one = ohlcv_df_one["close"].values[0]
+        self.reference_price_two = ohlcv_df_two["close"].values[0]
+        self._reference_prices_updated_at = current_time
         return None
+
+    def calculate_reference_delta(self) -> float:
+        if (
+            self.reference_price_one == 0
+            or self.reference_price_two == 0
+            or self.pair_one_current_price == 0
+            or self.pair_two_current_price == 0
+        ):
+            return 0.0
+
+        return self.calculate_delta_short(
+            init_price_one=self.reference_price_one,
+            last_price_one=self.pair_one_current_price,
+            init_price_two=self.reference_price_two,
+            last_price_two=self.pair_two_current_price,
+            fee_decimal=self.fee_decimal,
+            amount_quote=self.current_amount_quote,
+        )
+
+
+    def calculate_current_delta(self) -> float:
+        return self.calculate_delta_short(
+            init_price_one=self._position_open_price_one,
+            last_price_one=self.pair_one_current_price,
+            init_price_two=self._position_open_price_two,
+            last_price_two=self.pair_two_current_price,
+            fee_decimal=self.fee_decimal,
+            amount_quote=self.current_amount_quote,
+        )
 
     def calculate_delta_short(
         self,
@@ -218,6 +242,9 @@ class RatioArbitrageControllerV1(ControllerBase):
         amount_quote: float,
     ) -> float:
 
+        if init_price_one == 0 or init_price_two == 0:
+            return 0.0
+
         pair_one_ratio = last_price_one / init_price_one
         pair_two_ratio = last_price_two / init_price_two
 
@@ -225,38 +252,44 @@ class RatioArbitrageControllerV1(ControllerBase):
         fee = fee_decimal * amount_quote * (pair_one_ratio + pair_two_ratio + 2)
         return delta - fee
 
-    def is_open_short_conditions(self) -> bool:
-        if (
-            self.reference_price_one == 0
-            or self.reference_price_two == 0
-            or self.pair_one_current_price == 0
-            or self.pair_two_current_price == 0
-        ):
-            return False
 
-        delta = self.calculate_delta_short(
-            init_price_one=self.reference_price_one,
-            last_price_one=self.pair_one_current_price,
-            init_price_two=self.reference_price_two,
-            last_price_two=self.pair_two_current_price,
-            fee_decimal=self.fee_decimal,
-            amount_quote=self.current_amount_quote,
-        )
-        self._reference_short_delta = delta
-        return delta > self.config.open_short_threshold
+    def is_position_open_conditions(self) -> bool:
+        return self._reference_delta > self.config.open_position_threshold
 
-    def is_close_short_conditions(self) -> bool:
+    def is_position_close_conditions(self) -> bool:
+        return self._current_delta < self.config.close_position_threshold
 
-        delta = self.calculate_delta_short(
-            init_price_one=self._open_short_price_one,
-            last_price_one=self.pair_one_current_price,
-            init_price_two=self._open_short_price_two,
-            last_price_two=self.pair_two_current_price,
-            fee_decimal=self.fee_decimal,
-            amount_quote=self.current_amount_quote,
-        )
-        self._current_short_delta = delta
-        return delta > self.config.close_short_threshold
+
+    def check_and_handle_position_timeout(self, current_time: int) -> None:
+        if not self._has_active_position:
+            return None
+        position_duration = current_time - self._current_position_opened_at
+        if position_duration > self.config.position_max_duration_sec:
+            self.on_position_timeout()
+        return None
+
+    def on_position_timeout(self):
+        self.close_position()
+        self._positions_closed_by_timeout_count += 1
+        self.on_new_cycle_start()
+
+
+    def open_position(self):
+        self._position_open_price_one = self.pair_one_current_price
+        self._position_open_price_two = self.pair_two_current_price
+        self._current_position_opened_at = int(time.time())
+        self._total_positions_opened_count += 1
+        self._has_active_position = True
+
+
+    def close_position(self):
+        self.cumulative_delta += self._current_delta
+        self._position_open_price_one = 0.0
+        self._position_open_price_two = 0.0
+        self._total_positions_closed_count += 1
+        self._current_position_opened_at = 0
+        self._has_active_position = False
+
 
     def create_position_config(
         self,
@@ -279,6 +312,7 @@ class RatioArbitrageControllerV1(ControllerBase):
             connector_name=self.config.first_pair.connector_name,  # Both pairs use same connector (Binance)
         )
 
+
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """Determine what positions to open based on the BTC/ETH ratio"""
         executor_actions = []
@@ -290,7 +324,7 @@ class RatioArbitrageControllerV1(ControllerBase):
             return executor_actions
 
         # Check for exit conditions first
-        if self._active_first_pair_long and self._current_ratio >= self.config.exit_long_ratio:
+        if self._has_active_position and self._current_ratio >= self.config.exit_long_ratio:
             # Close BTC long and ETH short positions
             btc_config = self.create_position_config(
                 self.config.first_pair.trading_pair,
@@ -310,7 +344,7 @@ class RatioArbitrageControllerV1(ControllerBase):
                     CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
                 ]
             )
-            self._active_first_pair_long = False
+            self._has_active_position = False
 
         elif self._active_first_pair_short and self._current_ratio <= self.config.exit_short_ratio:
             # Close BTC short and ETH long positions
@@ -335,7 +369,7 @@ class RatioArbitrageControllerV1(ControllerBase):
             self._active_first_pair_short = False
 
         # Check for entry conditions
-        elif self._current_ratio <= self.config.lower_ratio and not self._active_first_pair_long:
+        elif self._current_ratio <= self.config.lower_ratio and not self._has_active_position:
             # Buy BTC and Sell ETH when ratio <= 5
             btc_config = self.create_position_config(
                 self.config.first_pair.trading_pair, TradeType.BUY, self.config.amount_quote_btc
@@ -349,7 +383,7 @@ class RatioArbitrageControllerV1(ControllerBase):
                     CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
                 ]
             )
-            self._active_first_pair_long = True
+            self._has_active_position = True
             self._active_first_pair_short = False
 
         elif self._current_ratio >= self.config.upper_ratio and not self._active_first_pair_short:
@@ -367,7 +401,7 @@ class RatioArbitrageControllerV1(ControllerBase):
                 ]
             )
             self._active_first_pair_short = True
-            self._active_first_pair_long = False
+            self._has_active_position = False
 
         return executor_actions
 
@@ -379,9 +413,9 @@ class RatioArbitrageControllerV1(ControllerBase):
             self.on_new_cycle_start()
             return None
 
-        time_since_reference = int(time.time()) - self.reference_updated_at
-        if time_since_reference > 60:
-            self.update_reference_prices()
+        tick_current_time = int(time.time())
+
+        self.check_and_handle_position_timeout(tick_current_time)
 
         # Получить свежие цены current_price_one и current_price_two
         self.pair_one_current_price = float(
@@ -395,99 +429,95 @@ class RatioArbitrageControllerV1(ControllerBase):
             )
         )
 
-        if self._active_first_pair_short:
-            if self.is_close_short_conditions():
-                self.exit_short()
+        self.update_reference_data(tick_current_time)
+        self._current_delta = self.calculate_current_delta()
 
-        elif self.is_open_short_conditions():
-            self.open_short()
+        if self._has_active_position:
+            if self.is_position_close_conditions():
+                self.close_position()
+
+        elif self.is_position_open_conditions():
+            self.open_position()
         
-        self.logger().info("Saving controller state to file...")
-        save_controller_state_to_file(self)
+        save_controller_state_to_file(self, tick_current_time)
 
         return None
 
-    def open_short(self):
-        self._open_short_price_one = self.pair_one_current_price
-        self._open_short_price_two = self.pair_two_current_price
-        self._active_first_pair_short = True
-        self._active_first_pair_long = False
-
-    def exit_short(self):
-        self._open_short_price_one = 0.0
-        self._open_short_price_two = 0.0
-        self._current_short_delta = 0.0
-        self._active_first_pair_short = False
+    
 
     def to_format_status(self) -> List[str]:
         """Format the current status for display"""
         status = [
-            f"Pair 1 Price: {self.pair_one_current_price}",
+            f"{self.config.trading_pair_one} price: {self.pair_one_current_price}",
             f"Reference Price One: {self.reference_price_one}",
-            f"Pair 2 Price: {self.pair_two_current_price}",
+            f"{self.config.trading_pair_two} price: {self.pair_two_current_price}",
             f"Reference Price Two: {self.reference_price_two}",
-            f"Reference Updated At: {self.reference_updated_at}",
-            f"Short Delta: {self._current_short_delta}",
-            f"Reference Short Delta: {self._reference_short_delta}",
-            f"Long Delta: {self._current_long_delta}",
-            f"Reference Long Delta: {self._reference_long_delta}",
-            # f"Pair 1 Normalized Price: {self.pair_one_normalized_price}",
-            f"Open Long Threshold: {self.config.open_long_threshold}",
-            f"Open Short Threshold: {self.config.open_short_threshold}",
-            f"Close Long Threshold: {self.config.close_long_threshold}",
-            f"Close Short Threshold: {self.config.close_short_threshold}",
-            f"Active Pair 1 Long: {self._active_first_pair_long}",
-            f"Active Pair 1 Short: {self._active_first_pair_short}",
+            f"Current Delta: {self._current_delta}",
+            f"Reference Delta: {self._reference_delta}",
+            f"Position open threshold: {self.config.open_position_threshold}",
+            f"Position close threshold: {self.config.close_position_threshold}",
+            f"Has active position: {self._has_active_position}",
+            f"Cumulative delta: {self.cumulative_delta}",
+            f"Total positions opened count: {self._total_positions_opened_count}",
+            f"Total positions closed count: {self._total_positions_closed_count}",
+            f"Positions closed by timeout count: {self._positions_closed_by_timeout_count}",
+            f"Current position opened at: {self._current_position_opened_at}",
+            f"Reference delta updated at: {self._reference_delta_updated_at}",
+            f"Reference prices updated at: {self._reference_prices_updated_at}",
+            f"Current amount quote: {self.current_amount_quote}"
         ]
 
         return status
 
 
-def save_controller_state_to_file(controller: RatioArbitrageControllerV1):
-    controller.logger().info("Saving controller state to file...")
+def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timestamp: int):
     filename = f"logs/controller_state_history_{controller.config.controller_name}_{controller.config.connector_one}.csv"
-    controller.logger().info(f"Saving controller state to file: {filename}")
     headers = [
         "timestamp",
         "pair_one",
-        "pair_one_price",
         "pair_two",
+        "pair_one_price",
         "pair_two_price",
         "reference_price_one",
         "reference_price_two",
-        "reference_updated_at",
-        "short_delta",
-        "reference_short_delta",
-        "long_delta",
-        "reference_long_delta",
-        "active_long",
-        "active_short",
-        "open_long_threshold",
-        "open_short_threshold",
-        "close_long_threshold",
-        "close_short_threshold",
+        "reference_prices_updated_at",
+        "reference_delta_updated_at",
+        "reference_delta",
+        "current_delta",
+        "has_active_position",
+        "position_open_threshold",
+        "position_close_threshold",
+        "current_position_opened_at",
+        "cumulative_delta",
+        "total_positions_opened_count",
+        "total_positions_closed_count",
+        "positions_closed_by_timeout_count",
+        "current_amount_quote"
     ]
 
     row = {
-        "timestamp": controller.market_data_provider.time(),
+        "timestamp": timestamp,
         "pair_one": controller.config.trading_pair_one,
-        "pair_one_price": controller.pair_one_current_price,
         "pair_two": controller.config.trading_pair_two,
+        "pair_one_price": controller.pair_one_current_price,
         "pair_two_price": controller.pair_two_current_price,
         "reference_price_one": controller.reference_price_one,
         "reference_price_two": controller.reference_price_two,
-        "reference_updated_at": controller.reference_updated_at,
-        "short_delta": controller._current_short_delta,
-        "reference_short_delta": controller._reference_short_delta,
-        "long_delta": controller._current_long_delta,
-        "reference_long_delta": controller._reference_long_delta,
-        "active_long": controller._active_first_pair_long,
-        "active_short": controller._active_first_pair_short,
-        "open_long_threshold": controller.config.open_long_threshold,
-        "open_short_threshold": controller.config.open_short_threshold,
-        "close_long_threshold": controller.config.close_long_threshold,
-        "close_short_threshold": controller.config.close_short_threshold,
+        "reference_prices_updated_at": controller._reference_prices_updated_at,
+        "reference_delta_updated_at": controller._reference_delta_updated_at,
+        "reference_delta": controller._reference_delta,
+        "current_delta": controller._current_delta,
+        "has_active_position": controller._has_active_position,
+        "position_open_threshold": controller.config.open_position_threshold,
+        "position_close_threshold": controller.config.close_position_threshold,
+        "current_position_opened_at": controller._current_position_opened_at,
+        "cumulative_delta": controller.cumulative_delta,
+        "total_positions_opened_count": controller._total_positions_opened_count,
+        "total_positions_closed_count": controller._total_positions_closed_count,
+        "positions_closed_by_timeout_count": controller._positions_closed_by_timeout_count,
+        "current_amount_quote": controller.current_amount_quote
     }
+
     if not os.path.exists(filename):
         with open(filename, "w") as f:
             writer = csv.writer(f)
