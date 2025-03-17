@@ -257,7 +257,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
         return self._reference_delta > self.config.open_position_threshold
 
     def is_position_close_conditions(self) -> bool:
-        return self._current_delta < self.config.close_position_threshold
+        return self._current_delta > self.config.close_position_threshold
 
 
     def check_and_handle_position_timeout(self, current_time: int) -> None:
@@ -430,9 +430,9 @@ class DeltaArbitrageControllerV1(ControllerBase):
         )
 
         self.update_reference_data(tick_current_time)
-        self._current_delta = self.calculate_current_delta()
 
         if self._has_active_position:
+            self._current_delta = self.calculate_current_delta()
             if self.is_position_close_conditions():
                 self.close_position()
 
