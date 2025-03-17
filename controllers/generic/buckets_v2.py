@@ -517,25 +517,6 @@ class BucketsV2Controller(ControllerBase):
         return self.start_price
 
 
-    # def calculate_returns(self) -> Decimal:
-    #     """Calculate the current returns based on position and entry price.
-
-    #     Returns:
-    #         Decimal: The current returns as a percentage. Positive for profit, negative for loss.
-    #     """
-    #     if self.current_qty == Decimal("0") or self.avg_entry_price == Decimal("0"):
-    #         return Decimal("0")
-
-    #     current_price = self.get_last_trade_price()
-    #     if current_price == Decimal("0"):
-    #         return Decimal("0")
-
-    #     if self.entry_side == TradeType.BUY:
-    #         return ((current_price - self.avg_entry_price) / self.avg_entry_price) * Decimal("100")
-    #     else:  # SHORT position
-    #         return ((self.avg_entry_price - current_price) / self.avg_entry_price) * Decimal("100")
-
-
     async def update_processed_data(self):
         """
         Update the processed data based on the current state of the strategy.
@@ -546,6 +527,7 @@ class BucketsV2Controller(ControllerBase):
             if math.isnan(self.avg_entry_price) or self.avg_entry_price == 0.0:
                 self.avg_entry_price = self.start_price
             return None
+
         mid_price = self.get_mid_price()
         last_trade_price = self.get_last_trade_price()
         if not self.is_active:
@@ -891,3 +873,126 @@ class BucketsV2Controller(ControllerBase):
 
         # Join all parts
         return "\n".join([separator, header_row, separator] + data_rows + [separator])
+
+
+def save_controller_state_to_file(controller: BucketsV2Controller):
+    filename = f"logs/{controller.config.id}.csv"
+
+    columns = [
+        "timestamp",
+        "inits_count",
+        "current_qty",
+        "start_price",
+        "avg_entry_price",
+        "mid_price",
+        "last_trade_price",
+        "is_active",
+        "entry_bucket_0_price",
+        "entry_bucket_0_qty",
+        "entry_bucket_0_amount",
+        "entry_bucket_0_side",
+        "entry_bucket_0_status",
+        "entry_bucket_0_is_last",
+        "entry_bucket_0_is_market",
+        "entry_bucket_1_price",
+        "entry_bucket_1_qty",
+        "entry_bucket_1_amount",
+        "entry_bucket_1_side",
+        "entry_bucket_1_status",
+        "entry_bucket_1_is_last",
+        "entry_bucket_1_is_market",
+        "entry_bucket_2_price",
+        "entry_bucket_2_qty",
+        "entry_bucket_2_amount",
+        "entry_bucket_2_side",
+        "entry_bucket_2_status",
+        "entry_bucket_2_is_last",
+        "entry_bucket_2_is_market",
+        "entry_bucket_3_price",
+        "entry_bucket_3_qty",
+        "entry_bucket_3_amount",
+        "entry_bucket_3_side",
+        "entry_bucket_3_status",
+        "entry_bucket_3_is_last",
+        "entry_bucket_3_is_market",
+        "exit_bucket_0_price",
+        "exit_bucket_0_qty",
+        "exit_bucket_0_amount",
+        "exit_bucket_0_side",
+        "exit_bucket_0_status",
+        "exit_bucket_0_is_last",
+        "exit_bucket_0_is_market",
+        "exit_bucket_1_price",
+        "exit_bucket_1_qty",
+        "exit_bucket_1_amount",
+        "exit_bucket_1_side",
+        "exit_bucket_1_status",
+        "exit_bucket_1_is_last",
+        "exit_bucket_1_is_market",
+        "exit_bucket_2_price",
+        "exit_bucket_2_qty",
+        "exit_bucket_2_amount",
+        "exit_bucket_2_side",
+        "exit_bucket_2_status",
+        "exit_bucket_2_is_last",
+        "exit_bucket_2_is_market",
+        "exit_bucket_3_price",
+        "exit_bucket_3_qty",
+        "exit_bucket_3_amount",
+        "exit_bucket_3_side",
+        "exit_bucket_3_status",
+        "exit_bucket_3_is_last",
+        "exit_bucket_3_is_market",
+        "entry_0_executor_id",
+        "entry_0_executor_is_active",
+        "entry_0_executor_is_filled",
+        "entry_0_executor_avg_entry_price",
+        "entry_0_executor_qty",
+        "entry_0_executor_amount",
+        "entry_1_executor_id",
+        "entry_1_executor_is_active",
+        "entry_1_executor_is_filled",
+        "entry_1_executor_avg_entry_price",
+        "entry_1_executor_qty",
+        "entry_1_executor_amount",
+        "entry_2_executor_id",
+        "entry_2_executor_is_active",
+        "entry_2_executor_is_filled",
+        "entry_2_executor_avg_entry_price",
+        "entry_2_executor_qty",
+        "entry_2_executor_amount",
+        "entry_3_executor_id",
+        "entry_3_executor_is_active",
+        "entry_3_executor_is_filled",
+        "entry_3_executor_avg_entry_price",
+        "entry_3_executor_qty",
+        "entry_3_executor_amount",
+        "exit_0_executor_id",
+        "exit_0_executor_is_active",
+        "exit_0_executor_is_filled",
+        "exit_0_executor_avg_entry_price",
+        "exit_0_executor_qty",
+        "exit_0_executor_amount",
+        "exit_1_executor_id",
+        "exit_1_executor_is_active",
+        "exit_1_executor_is_filled",
+        "exit_1_executor_avg_entry_price",
+        "exit_1_executor_qty",
+        "exit_1_executor_amount",
+        "exit_2_executor_id",
+        "exit_2_executor_is_active",
+        "exit_2_executor_is_filled",
+        "exit_2_executor_avg_entry_price",
+        "exit_2_executor_qty",
+        "exit_2_executor_amount",
+        "exit_3_executor_id",
+        "exit_3_executor_is_active",
+        "exit_3_executor_is_filled",
+        "exit_3_executor_avg_entry_price",
+        "exit_3_executor_qty",
+        "exit_3_executor_amount",
+    ]
+
+    if not os.path.exists(filename):
+        with open(filename, "w") as f:
+            f.write("timestamp,connector_name,side,price,qty,status\n")
