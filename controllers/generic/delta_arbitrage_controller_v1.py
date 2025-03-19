@@ -122,6 +122,12 @@ class DeltaArbitrageControllerV1Config(ControllerConfigBase):
 
 
 class DeltaArbitrageControllerV1(ControllerBase):
+
+    @property
+    def config_total_amount_quote(self) -> float:
+        return float(self.config.total_amount_quote)
+
+
     def __init__(self, config: DeltaArbitrageControllerV1Config, *args, **kwargs):
         self.logger().warning(f"Initializing Delta Arbitrage Controller with config: {config}")
         super().__init__(config, *args, **kwargs)
@@ -279,7 +285,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
 
     def close_position(self):
         self.cumulative_delta = self.cumulative_delta * (1 + self._current_delta)
-        self.current_amount_quote = self.current_amount_quote + self._current_delta * self.config.total_amount_quote
+        self.current_amount_quote = self.current_amount_quote + self._current_delta * self.config_total_amount_quote
         self._position_open_price_one = 0.0
         self._position_open_price_two = 0.0
         self._total_positions_closed_count += 1
