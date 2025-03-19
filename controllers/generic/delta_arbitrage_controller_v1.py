@@ -1,7 +1,6 @@
 from decimal import Decimal
 from typing import Dict, List, Set
 from pydantic import Field, validator
-import math
 import time
 import csv
 import os
@@ -14,7 +13,6 @@ from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction,
 from hummingbot.core.data_type.common import OrderType, PositionAction, TradeType
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.client.config.config_data_types import ClientFieldData
-import numpy as np
 
 
 class DeltaArbitrageControllerV1Config(ControllerConfigBase):
@@ -55,7 +53,7 @@ class DeltaArbitrageControllerV1Config(ControllerConfigBase):
         client_data=ClientFieldData(prompt=lambda e: "Enter the reference price window size: ", prompt_on_new=True),
     )
     position_max_duration_sec: int = Field(
-        default=60000,
+        default=60000, # 1000 minutes
         client_data=ClientFieldData(prompt=lambda e: "Enter the period to close position by timeout in seconds (60000): ", prompt_on_new=True),
     )
 
@@ -145,7 +143,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self._reference_delta_updated_at: int = 0
         self.current_amount_quote: float = float(config.total_amount_quote)
         self._current_position_opened_at: int = 0
-        self.cumulative_delta: float = 0.0
+        self.cumulative_delta: float = 1.0
         self._total_positions_opened_count: int = 0
         self._total_positions_closed_count: int = 0
         self._positions_closed_by_timeout_count: int = 0
@@ -177,12 +175,12 @@ class DeltaArbitrageControllerV1(ControllerBase):
         """
         Update historical prices for delta calculation
         """
-        self._reference_delta = self.calculate_reference_delta()
+        self._reference_delta = self.calculate_reference_relative_delta()
         self._reference_delta_updated_at = current_time
         
-        REFERENCE_DELTA_UPDATE_INTERVAL = 60
+        REFERENCE_PRICES_UPDATE_INTERVAL = 60
         time_since_reference_updated = current_time - self._reference_prices_updated_at
-        if time_since_reference_updated <= REFERENCE_DELTA_UPDATE_INTERVAL:
+        if time_since_reference_updated <= REFERENCE_PRICES_UPDATE_INTERVAL:
             return None
 
         ohlcv_df_one = self.market_data_provider.get_candles_df(
@@ -203,7 +201,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self._reference_prices_updated_at = current_time
         return None
 
-    def calculate_reference_delta(self) -> float:
+    def calculate_reference_relative_delta(self) -> float:
         if (
             self.reference_price_one == 0
             or self.reference_price_two == 0
@@ -212,34 +210,31 @@ class DeltaArbitrageControllerV1(ControllerBase):
         ):
             return 0.0
 
-        return self.calculate_delta_short(
+        return self.calculate_relative_delta_short(
             init_price_one=self.reference_price_one,
             last_price_one=self.pair_one_current_price,
             init_price_two=self.reference_price_two,
             last_price_two=self.pair_two_current_price,
             fee_decimal=self.fee_decimal,
-            amount_quote=self.current_amount_quote,
         )
 
 
-    def calculate_current_delta(self) -> float:
-        return self.calculate_delta_short(
+    def calculate_current_relative_delta(self) -> float:
+        return self.calculate_relative_delta_short(
             init_price_one=self._position_open_price_one,
             last_price_one=self.pair_one_current_price,
             init_price_two=self._position_open_price_two,
             last_price_two=self.pair_two_current_price,
             fee_decimal=self.fee_decimal,
-            amount_quote=self.current_amount_quote,
         )
 
-    def calculate_delta_short(
+    def calculate_relative_delta_short(
         self,
         init_price_one: float,
         last_price_one: float,
         init_price_two: float,
         last_price_two: float,
         fee_decimal: float,
-        amount_quote: float,
     ) -> float:
 
         if init_price_one == 0 or init_price_two == 0:
@@ -248,8 +243,8 @@ class DeltaArbitrageControllerV1(ControllerBase):
         pair_one_ratio = last_price_one / init_price_one
         pair_two_ratio = last_price_two / init_price_two
 
-        delta = -amount_quote * (pair_one_ratio - pair_two_ratio)
-        fee = fee_decimal * amount_quote * (pair_one_ratio + pair_two_ratio + 2)
+        delta = (pair_two_ratio - pair_one_ratio)
+        fee = fee_decimal * (pair_one_ratio + pair_two_ratio + 2)
         return delta - fee
 
 
@@ -283,7 +278,8 @@ class DeltaArbitrageControllerV1(ControllerBase):
 
 
     def close_position(self):
-        self.cumulative_delta += self._current_delta
+        self.cumulative_delta = self.cumulative_delta * (1 + self._current_delta)
+        self.current_amount_quote = self.current_amount_quote * (1 + self._current_delta)
         self._position_open_price_one = 0.0
         self._position_open_price_two = 0.0
         self._total_positions_closed_count += 1
@@ -432,7 +428,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self.update_reference_data(tick_current_time)
 
         if self._has_active_position:
-            self._current_delta = self.calculate_current_delta()
+            self._current_delta = self.calculate_current_relative_delta()
             if self.is_position_close_conditions():
                 self.close_position()
 
@@ -488,10 +484,10 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "position_open_threshold",
         "position_close_threshold",
         "current_position_opened_at",
-        "cumulative_delta",
         "total_positions_opened_count",
         "total_positions_closed_count",
         "positions_closed_by_timeout_count",
+        "cumulative_delta",
         "current_amount_quote"
     ]
 
@@ -511,10 +507,10 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "position_open_threshold": controller.config.open_position_threshold,
         "position_close_threshold": controller.config.close_position_threshold,
         "current_position_opened_at": controller._current_position_opened_at,
-        "cumulative_delta": controller.cumulative_delta,
         "total_positions_opened_count": controller._total_positions_opened_count,
         "total_positions_closed_count": controller._total_positions_closed_count,
         "positions_closed_by_timeout_count": controller._positions_closed_by_timeout_count,
+        "cumulative_delta": controller.cumulative_delta,
         "current_amount_quote": controller.current_amount_quote
     }
 
