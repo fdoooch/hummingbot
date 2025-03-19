@@ -1,5 +1,6 @@
 from decimal import Decimal
 from enum import Enum
+from tkinter import FALSE
 from typing import Any, Dict, List, Set
 from pydantic import BaseModel, Field, validator
 import math
@@ -11,6 +12,12 @@ from hummingbot.strategy_v2.controllers.directional_trading_controller_base impo
 from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
+from hummingbot.strategy_v2.models.executors import CloseType
+from hummingbot.strategy_v2.models.base import RunnableStatus
+
+import os
+import csv
+import time
 
 
 """
@@ -53,12 +60,49 @@ class GridBucket(BaseModel):
 
 class ExecutorState(BaseModel):
     id: str
-    level_id: str
+    timestamp: float
+    type: str
+    close_timestamp: float | None
+    close_type: CloseType | None
+    status: RunnableStatus
+    config: PositionExecutorConfig
+    net_pnl_pct: Decimal
+    net_pnl_quote: Decimal
+    cum_fees_quote: Decimal
+    filled_amount_quote: Decimal
     is_active: bool
-    is_filled: bool
-    average_entry_price: float
-    amount: float
-    qty: float
+    is_trading: bool
+    custom_info: dict
+    controller_id: str | None = None
+
+
+    @property
+    def level_id(self) -> str:
+        return self.custom_info.get("level_id", "unknown_level_id")
+
+    @property
+    def is_active_and_not_filled(self) -> bool:
+        return self.is_active and not self.is_trading
+
+    @property
+    def is_full_filled(self) -> bool:
+        return self.is_active and self.is_trading
+
+    @property
+    def average_entry_price(self) -> float:
+        return float(self.custom_info.get("current_position_average_price", 0.0))
+
+    @property
+    def amount(self) -> float:
+        return float(self.filled_amount_quote)
+
+    @property
+    def qty(self) -> float:
+        return float(self.amount / self.average_entry_price)
+
+    @property
+    def is_terminated(self) -> bool:
+        return self.status in [RunnableStatus.TERMINATED, RunnableStatus.SHUTTING_DOWN]
 
 
 class BucketsV2ControllerConfig(ControllerConfigBase):
@@ -208,26 +252,28 @@ class BucketsV2ControllerConfig(ControllerConfigBase):
 
 class BucketsV2Controller(ControllerBase):
     inits_count: int = 0
+    cycle_num: int = 0
 
     @property
-    def state(self) -> Dict[str, Any]:
+    def state(self) -> dict[str, Any]:
         return {}
 
     @property
-    def executors_states(self) -> Dict[str, Any]:
+    def executors_states(self) -> dict[str, ExecutorState]:
         executors_states = {
             ex.custom_info["level_id"]: ExecutorState(
-                id=ex.id,
-                level_id=ex.custom_info["level_id"],
-                is_active=ex.is_active and not ex.is_trading,
-                is_filled=ex.is_active and ex.is_trading,
-                average_entry_price=ex.custom_info["current_position_average_price"],
-                amount=ex.filled_amount_quote,
-                qty=ex.filled_amount_quote / ex.custom_info["current_position_average_price"],
+                **ex.to_dict()
             )
             for ex in self.executors_info
         }
         return executors_states
+
+    @property
+    def has_inactive_exit_bucket(self) -> bool:
+        for bucket in self.exit_buckets.values():
+            if bucket.status == GridBucketStatus.NOT_ACTIVE:
+                return True
+        return False
 
     def __init__(self, config: BucketsV2ControllerConfig, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
@@ -237,8 +283,8 @@ class BucketsV2Controller(ControllerBase):
         self.position_mode = self.config.position_mode
         self.entry_side = self.config.entry_side
         self.exit_side = TradeType.SELL if self.entry_side == TradeType.BUY else TradeType.BUY
-        self.entry_buckets: Dict[str, GridBucket] = {}
-        self.exit_buckets: Dict[str, GridBucket] = {}
+        self.entry_buckets: dict[str, GridBucket] = {}
+        self.exit_buckets: dict[str, GridBucket] = {}
         self._entry_grid_updated_at = 0
         self._exit_grid_updated_at = 0
         self.current_qty: float = 0.0
@@ -247,13 +293,14 @@ class BucketsV2Controller(ControllerBase):
         self.avg_entry_price: float = self.start_price
         self.executors_actions: List[ExecutorAction] = []
         self.trading_rules = None
-        self.entry_buckets: Dict[str, GridBucket] = {}
-        self.exit_buckets: Dict[str, GridBucket] = {}
-        self.trades: List[Any] = []
+        self.entry_buckets: dict[str, GridBucket] = {}
+        self.exit_buckets: dict[str, GridBucket] = {}
+        self.trades: list = []
         self.is_active = True
         self.is_last_exit_bucket_filled = False
         self._is_new_bucket_filled = False
         self._is_new_entry_bucket_filled = False
+        self._is_new_exit_bucket_filled = False
         BucketsV2Controller.inits_count += 1
         self.logger().info(f"INIT -> Controller initialized: {BucketsV2Controller.inits_count}")
 
@@ -287,7 +334,7 @@ class BucketsV2Controller(ControllerBase):
 
     def _calculate_entry_buckets(self) -> Dict[str, GridBucket]:
         self.logger().info("calculate_entry_buckets")
-        self.logger().info("Entry buckets: %s", self.entry_buckets)
+        # self.logger().info("Entry buckets: %s", self.entry_buckets)
         self.trading_rules = self.market_data_provider.get_trading_rules(
             self.config.connector_name, self.config.trading_pair
         )
@@ -295,8 +342,9 @@ class BucketsV2Controller(ControllerBase):
         min_amount = self.config.min_order_amount
 
         for bucket in self.config.entry_buckets:
-            if self.entry_buckets.get(bucket.id) and self.entry_buckets[bucket.id].status == GridBucketStatus.FILLED:
-                buckets[bucket.id] = self.entry_buckets[bucket.id]
+            bucket_id = f"{self.cycle_num}_{bucket.id}"
+            if self.entry_buckets.get(bucket_id) and self.entry_buckets[bucket_id].status == GridBucketStatus.FILLED:
+                buckets[bucket_id] = self.entry_buckets[bucket_id]
                 continue
 
             if self.entry_side == TradeType.BUY:
@@ -310,31 +358,33 @@ class BucketsV2Controller(ControllerBase):
             amount = qty_quantized * price_quantized
             status = GridBucketStatus.NOT_ACTIVE if amount >= min_amount else GridBucketStatus.SKIPPED
 
-            buckets[bucket.id] = GridBucket(
-                id=bucket.id,
+            buckets[bucket_id] = GridBucket(
+                id=bucket_id,
                 price=price_quantized,
                 qty=qty_quantized,
                 amount=amount,
                 side=self.entry_side,
                 status=status,
-                is_market=False if bucket.drawdown_percentage != 0 else True
+                is_market=True if bucket.drawdown_percentage == 0 else False
             )
-            self.logger().info("BUCKET: %s", buckets[bucket.id])
+            self.logger().info("BUCKET: %s", buckets[bucket_id])
         return buckets
 
     def _calculate_exit_buckets(self) -> Dict[str, GridBucket]:
         self.logger().info(f"calculate_exit_buckets. Exit side: {self.exit_side}")
         buckets = {}
-        self.logger().info("current_qty: %s", self.current_qty)
+        # self.logger().info("current_qty: %s", self.current_qty)
         if self.current_qty == 0:
             return buckets
+            
         min_amount = self.config.min_order_amount
         available_qty = self.current_qty    
         average_entry_price = self.avg_entry_price
 
         for bucket in self.config.exit_buckets:
-            if self.exit_buckets.get(bucket.id) and self.exit_buckets[bucket.id].status == GridBucketStatus.FILLED:
-                buckets[bucket.id] = self.exit_buckets[bucket.id]
+            bucket_id = f"{self.cycle_num}_{bucket.id}"
+            if self.exit_buckets.get(bucket_id) and self.exit_buckets[bucket_id].status == GridBucketStatus.FILLED:
+                buckets[bucket_id] = self.exit_buckets[bucket_id]
                 continue
 
             if self.exit_side == TradeType.BUY:
@@ -352,17 +402,17 @@ class BucketsV2Controller(ControllerBase):
             else:
                 status = GridBucketStatus.SKIPPED
 
-            buckets[bucket.id] = GridBucket(
-                id=bucket.id,
+            buckets[bucket_id] = GridBucket(
+                id=bucket_id,
                 price=price_quantized,
                 qty=qty_quantized,
                 amount=amount,
                 side=self.exit_side,
                 status=status,
             )
-
-            self.logger().debug("available_qty: %s", available_qty)
-            self.logger().info("buckets: %s", buckets)
+            self.logger().info("BUCKET: %s", buckets[bucket_id])
+            # self.logger().debug("available_qty: %s", available_qty)
+            # self.logger().info("buckets: %s", buckets)
         if available_qty > 0:
             self.logger().warning("Not all QTY was allocated to exit buckets. Available QTY: %s", available_qty)
 
@@ -396,19 +446,25 @@ class BucketsV2Controller(ControllerBase):
         result_buckets = {}
 
         for bucket_id, bucket in grid_buckets.items():
-            if not executors_states.get(bucket.id):
+            if not executors_states.get(bucket_id):
                 result_buckets[bucket_id] = bucket
                 continue
             if bucket.status == GridBucketStatus.FILLED:
                 result_buckets[bucket_id] = bucket
                 continue
 
-            if executors_states[bucket_id].is_active:
+            if executors_states[bucket_id].is_active_and_not_filled:
                 bucket.status = GridBucketStatus.ACTIVE
             
-            elif executors_states[bucket_id].is_filled:
-                self.logger().info(f"BUCKET {bucket_id} FILLED: {bucket}")
-                self.logger().info(f"Executors: {self.executors_states}")
+            elif executors_states[bucket_id].is_full_filled:
+                self.logger().info(f"BUCKET FILLED {bucket_id}: {bucket}")
+                # self.logger().info(f"Executors: {self.executors_states}")
+                base_symbol = self.config.trading_pair.split('-')[0]
+                exchange_qty = float(self.market_data_provider.get_balance(self.config.connector_name, base_symbol))
+                # self.logger().info(f"Exchange QTY: {exchange_qty}")
+                # self.logger().info(f"Current QTY: {self.current_qty}\n\n")
+
+
                 self._is_new_bucket_filled = True
                 calculated_qty = self.current_qty + (
                     executors_states[bucket_id].qty
@@ -428,7 +484,7 @@ class BucketsV2Controller(ControllerBase):
                     self.is_last_exit_bucket_filled = True
 
             result_buckets[bucket_id] = bucket
-        self.logger().info(f"handle executors updates.\nENTRY_BUCKETS: {self.entry_buckets}\nEXIT_BUCKETS: {self.exit_buckets}\ngrid_buckets: {grid_buckets}\nresult_buckets: {result_buckets}")
+        # self.logger().info(f"handle executors updates.\nENTRY_BUCKETS: {self.entry_buckets}\nEXIT_BUCKETS: {self.exit_buckets}\ngrid_buckets: {grid_buckets}\nresult_buckets: {result_buckets}")
 
         return result_buckets
 
@@ -460,12 +516,13 @@ class BucketsV2Controller(ControllerBase):
         return float(mid_price)
 
     def _on_last_exit_bucket_filled(self) -> bool:        
-        self.logger().info("Last exit bucket filled")
+        self.logger().info("LAST EXIT BUCKET FILLED")
         stop_actions = [
             StopExecutorAction(controller_id=self.config.id, executor_id=executor.id, keep_position=True)
             for executor in self.executors_info
         ]
-        self.executors_actions.extend(stop_actions)
+        self.executors_actions.extend(stop_actions)  
+        self.cycle_num += 1
         self.reset_buckets()
 
     # def fetch_start_price(self) -> Decimal:
@@ -511,9 +568,9 @@ class BucketsV2Controller(ControllerBase):
         if qty > 0:
             price = amount / qty
         if price != 0.0:
-            self.logger().info(f"AVERAGE_ENTRY_PRICE: {price}")
+            # self.logger().info(f"AVERAGE_ENTRY_PRICE: {price}")
             return price
-        self.logger().info(f"AVERAGE_ENTRY_PRICE is START_PRICE: {self.start_price}")
+        # self.logger().info(f"AVERAGE_ENTRY_PRICE is START_PRICE: {self.start_price}")
         return self.start_price
 
 
@@ -542,7 +599,7 @@ class BucketsV2Controller(ControllerBase):
         
         avg_entry_price = self.avg_entry_price
         self.entry_buckets = self._handle_executors_updates(self.entry_buckets)
-        self.logger().info(f"ENTRY BUCKETS after handle executors: {self.entry_buckets}")
+        # self.logger().info(f"ENTRY BUCKETS after handle executors: {self.entry_buckets}")
         self._is_new_entry_bucket_filled = self._is_new_bucket_filled
         self._is_new_bucket_filled = False
 
@@ -550,6 +607,7 @@ class BucketsV2Controller(ControllerBase):
             self.avg_entry_price = self.calculate_average_long_entry_price()
 
         self.exit_buckets = self._handle_executors_updates(self.exit_buckets)
+        self._is_new_exit_bucket_filled = self._is_new_bucket_filled
         self._is_new_bucket_filled = False
 
 
@@ -558,10 +616,10 @@ class BucketsV2Controller(ControllerBase):
         
         if self._is_new_entry_bucket_filled:
             self.entry_buckets = self._calculate_entry_buckets()
-            self._determine_entry_executors()
             self.exit_buckets = self._calculate_exit_buckets()
-            self._determine_exit_executors()
-            self._is_new_entry_bucket_filled = False
+
+        if self.is_last_exit_bucket_filled:
+            self._on_last_exit_bucket_filled()
 
         # avg_entry_price = self.calculate_average_long_entry_price()
         self.processed_data.update(
@@ -575,66 +633,102 @@ class BucketsV2Controller(ControllerBase):
                 "short_activation_bounds": mid_price * (1 + self.config.activation_bounds),
             }
         )
+        save_controller_state_to_file(self)
 
     def _determine_entry_executors(self):
         actions = []
+        executors_states = self.executors_states
+        self.logger().info(f"DETERMINE ENTRY EXECUTORS ({len(executors_states)})")
+        self.logger().info(f"Executors: {self.executors_info}")
         for bucket_id, bucket in self.entry_buckets.items():
+            executor_state = executors_states.get(bucket_id)
 
-            if bucket.status == GridBucketStatus.ACTIVE and self.executors_states[bucket_id].is_active:
+            if bucket.status == GridBucketStatus.FILLED:
+                if executor_state and not executor_state.is_terminated:
+                    self.logger().info(f"STOP FILLED ENTRY EXECUTOR. {bucket}")
+                    self.logger().info(f"EXECUTOR STATE: {executor_state}")
+                    actions.append(
+                        StopExecutorAction(
+                            controller_id=self.config.id,
+                            executor_id=executor_state.id,
+                            keep_position=True,
+                        )
+                    )
+                continue
+            
+            if bucket.status == GridBucketStatus.ACTIVE and executor_state.is_active_and_not_filled and executor_state.qty == bucket.qty and executor_state.config.entry_price == bucket.price:
                 # Place only one entry order at once
                 break
 
-            if bucket.status == GridBucketStatus.FILLED:
-                continue
-
             # stop current bucket executor
-            if self.executors_states.get(bucket_id):
+            if executors_states.get(bucket_id):
                 self.logger().info(f"STOP ENTRY EXECUTOR. {bucket}")
-                self.logger().info(f"EXECUTOR STATE: {self.executors_states[bucket_id]}")
+                self.logger().info(f"EXECUTOR STATE: {executors_states[bucket_id]}")
                 actions.append(
                     StopExecutorAction(
                         controller_id=self.config.id,
-                        executor_id=self.executors_states[bucket_id].id,
+                        executor_id=executors_states[bucket_id].id,
+                        keep_position=False,
                     )
                 )
 
-            if bucket.status == GridBucketStatus.SKIPPED:
+            if bucket.status in [GridBucketStatus.SKIPPED]:
                 continue
+
+            executor_config = self.get_market_entry_executor_config(
+                qty=bucket.qty,
+                level_id=bucket.id,
+            ) if bucket.is_market else self.get_limit_entry_executor_config(
+                price=bucket.price,
+                qty=bucket.qty,
+                level_id=bucket.id,
+            )
 
             # create new bucket executor
             self.logger().info(f"NEW ENTRY EXECUTOR. {bucket}")
-            self.logger().info(f"Executors: {self.executors_states}")
             actions.append(
                 CreateExecutorAction(
                     controller_id=self.config.id,
-                    executor_config=self.get_limit_entry_executor_config(
-                        price=bucket.price,
-                        qty=bucket.qty,
-                        level_id=bucket.id,
+                    executor_config=executor_config,
                     ),
                 )
-            )
             # place only one entry order per once
             break
-
+        self.logger().info(f"ENTRY EXECUTOR ACTIONS: {actions}")
         return actions
 
     def _determine_exit_executors(self):
         actions = []
+        executors_states = self.executors_states
         for bucket_id, bucket in self.exit_buckets.items():
+            executor_state = executors_states.get(bucket_id)
 
             if bucket.status == GridBucketStatus.FILLED:
+                if executor_state and not executor_state.is_terminated:
+                    self.logger().info(f"STOP FILLED EXIT EXECUTOR. {bucket}")
+                    self.logger().info(f"EXECUTOR STATE: {executor_state}")
+                    actions.append(
+                        StopExecutorAction(
+                            controller_id=self.config.id,
+                            executor_id=executor_state.id,
+                            keep_position=True,
+                        )
+                    )
                 continue
 
-            if bucket.status == GridBucketStatus.ACTIVE and self.executors_states[bucket_id].is_active:
+            if bucket.status == GridBucketStatus.ACTIVE and executor_state.is_active_and_not_filled and executor_state.qty == bucket.qty and executor_state.config.entry_price == bucket.price:
+                # Place only one entry order at once
                 continue
 
             # stop current bucket executor
-            if self.executors_states.get(bucket_id):
+            if executor_state:
+                self.logger().info(f"STOP EXIT EXECUTOR. {bucket}")
+                self.logger().info(f"EXECUTOR STATE: {executor_state}")
                 actions.append(
                     StopExecutorAction(
                         controller_id=self.config.id,
-                        executor_id=self.executors_states[bucket_id].id,
+                        executor_id=executor_state.id,
+                        keep_position=False,
                     )
                 )
                 
@@ -649,7 +743,8 @@ class BucketsV2Controller(ControllerBase):
 
             # create new bucket executor
             self.logger().info(f"NEW EXIT EXECUTOR. {bucket}")
-            self.logger().info(f"Executors: {self.executors_states}")
+            executors_str = '\n'.join([f'{k}: {v}' for k, v in executors_states.items()])
+            self.logger().info(f"Executors:\n{executors_str}")
             actions.append(
                 CreateExecutorAction(
                     controller_id=self.config.id,
@@ -660,6 +755,8 @@ class BucketsV2Controller(ControllerBase):
                     ),
                 )
             )
+            # create one executor per tick
+            break
 
         return actions
 
@@ -670,14 +767,23 @@ class BucketsV2Controller(ControllerBase):
         # self.logger().info(f"Determin executor actions. start_price: {self.start_price}")
         if math.isnan(self.start_price) or self.start_price == 0.0 or self.avg_entry_price == 0.0:
             return []
+
+        actions = self.executors_actions
         if self.entry_buckets == {}:
             self.entry_buckets = self._calculate_entry_buckets()
-        actions = self.executors_actions
+            actions.extend(self._determine_entry_executors())
         # actions.extend(self.determine_create_executor_actions())
         # actions.extend(self.determine_stop_executor_actions())
-        actions.extend(self._determine_entry_executors())
-        actions.extend(self._determine_exit_executors())
+        if self._is_new_entry_bucket_filled:
+            actions.extend(self._determine_entry_executors())
+            actions.extend(self._determine_exit_executors())
+
+        elif self._is_new_exit_bucket_filled or self.has_inactive_exit_bucket:
+            actions.extend(self._determine_exit_executors())
+
         self.executors_actions = []
+        self._is_new_entry_bucket_filled = False
+        self._is_new_exit_bucket_filled = False
         return actions
 
     # def determine_create_executor_actions(self) -> List[ExecutorAction]:
@@ -776,18 +882,23 @@ class BucketsV2Controller(ControllerBase):
         self.avg_entry_price = self.start_price
         self.entry_buckets = {}
         self.exit_buckets = {}
+        self._is_new_entry_bucket_filled = False
+        self._is_new_exit_bucket_filled = False
         self.is_last_exit_bucket_filled = False
         self.entry_buckets = self._calculate_entry_buckets()
 
 
     def on_stop(self):
-        stop_actions = [
-            StopExecutorAction(controller_id=self.config.id, executor_id=executor.id, keep_position=True)
-            for executor in self.executors_info
-        ]
+        self.logger().info("ON STOP STARTED")
+        executors_states = self.executors_states
+        stop_actions = []
+        for executor_id, executor_state in executors_states.items():
+            self.logger().info(f"STOP EX. {executor_id} - {executor_state}")
+            keep_position = not executor_state.is_active_and_not_filled
+            stop_actions.append(StopExecutorAction(controller_id=self.config.id, executor_id=executor_state.id, keep_position=keep_position))
         self.executors_actions.extend(stop_actions)
         self.is_active = False
-        self.logger().info("ON STOP")
+        self.logger().info("ON STOP FINISHED")
 
     def to_format_status(self) -> List[str]:
         # Check if there are any buckets before creating the table
@@ -878,13 +989,12 @@ class BucketsV2Controller(ControllerBase):
 def save_controller_state_to_file(controller: BucketsV2Controller):
     filename = f"logs/{controller.config.id}.csv"
 
-    columns = [
+    headers = [
         "timestamp",
-        "inits_count",
+        "cycle_num",
         "current_qty",
         "start_price",
         "avg_entry_price",
-        "mid_price",
         "last_trade_price",
         "is_active",
         "entry_bucket_0_price",
@@ -944,55 +1054,168 @@ def save_controller_state_to_file(controller: BucketsV2Controller):
         "exit_bucket_3_is_last",
         "exit_bucket_3_is_market",
         "entry_0_executor_id",
-        "entry_0_executor_is_active",
-        "entry_0_executor_is_filled",
+        "entry_0_executor_status",
+        "entry_0_executor_is_active_and_not_filled",
+        "entry_0_executor_is_full_filled",
+        "entry_0_executor_is_terminated",
         "entry_0_executor_avg_entry_price",
         "entry_0_executor_qty",
         "entry_0_executor_amount",
         "entry_1_executor_id",
-        "entry_1_executor_is_active",
-        "entry_1_executor_is_filled",
+        "entry_1_executor_status",
+        "entry_1_executor_is_active_and_not_filled",
+        "entry_1_executor_is_full_filled",
+        "entry_1_executor_is_terminated",
         "entry_1_executor_avg_entry_price",
         "entry_1_executor_qty",
         "entry_1_executor_amount",
         "entry_2_executor_id",
-        "entry_2_executor_is_active",
-        "entry_2_executor_is_filled",
+        "entry_2_executor_status",
+        "entry_2_executor_is_active_and_not_filled",
+        "entry_2_executor_is_full_filled",
+        "entry_2_executor_is_terminated",
         "entry_2_executor_avg_entry_price",
         "entry_2_executor_qty",
         "entry_2_executor_amount",
         "entry_3_executor_id",
-        "entry_3_executor_is_active",
-        "entry_3_executor_is_filled",
+        "entry_3_executor_status",
+        "entry_3_executor_is_active_and_not_filled",
+        "entry_3_executor_is_full_filled",
+        "entry_3_executor_is_terminated",
         "entry_3_executor_avg_entry_price",
         "entry_3_executor_qty",
         "entry_3_executor_amount",
         "exit_0_executor_id",
-        "exit_0_executor_is_active",
-        "exit_0_executor_is_filled",
+        "exit_0_executor_status",
+        "exit_0_executor_is_active_and_not_filled",
+        "exit_0_executor_is_full_filled",
+        "exit_0_executor_is_terminated",
         "exit_0_executor_avg_entry_price",
         "exit_0_executor_qty",
         "exit_0_executor_amount",
         "exit_1_executor_id",
-        "exit_1_executor_is_active",
-        "exit_1_executor_is_filled",
+        "exit_1_executor_status",
+        "exit_1_executor_is_active_and_not_filled",
+        "exit_1_executor_is_full_filled",
+        "exit_1_executor_is_terminated",
         "exit_1_executor_avg_entry_price",
         "exit_1_executor_qty",
         "exit_1_executor_amount",
         "exit_2_executor_id",
-        "exit_2_executor_is_active",
-        "exit_2_executor_is_filled",
+        "exit_2_executor_status",
+        "exit_2_executor_is_active_and_not_filled",
+        "exit_2_executor_is_full_filled",
+        "exit_2_executor_is_terminated",
         "exit_2_executor_avg_entry_price",
         "exit_2_executor_qty",
         "exit_2_executor_amount",
         "exit_3_executor_id",
-        "exit_3_executor_is_active",
-        "exit_3_executor_is_filled",
+        "exit_3_executor_status"
+        "exit_3_executor_is_active_and_not_filled",
+        "exit_3_executor_is_full_filled",
+        "exit_3_executor_is_terminated",
         "exit_3_executor_avg_entry_price",
         "exit_3_executor_qty",
         "exit_3_executor_amount",
     ]
 
+    
+
+    row = {
+        "timestamp": time.time(),
+        "cycle_num": controller.cycle_num,
+        "current_qty": controller.current_qty,
+        "start_price": controller.start_price,
+        "avg_entry_price": controller.avg_entry_price,
+        "last_trade_price": controller.last_trade_price,
+        "is_active": controller.is_active,
+
+        
+    }
+
+    executors_states = controller.executors_states
+
+    for i in range(4):
+        bucket_id = f"{controller.cycle_num}_entry_{i}"
+        if not controller.entry_buckets.get(f"{controller.cycle_num}_entry_{i}"):
+            row[f"entry_bucket_{i}_price"] = None
+            row[f"entry_bucket_{i}_qty"] = None
+            row[f"entry_bucket_{i}_amount"] = None
+            row[f"entry_bucket_{i}_side"] = None
+            row[f"entry_bucket_{i}_status"] = None
+            row[f"entry_bucket_{i}_is_last"] = None
+            row[f"entry_bucket_{i}_is_market"] = None
+        else:
+            row[f"entry_bucket_{i}_price"] = controller.entry_buckets.get(bucket_id).price
+            row[f"entry_bucket_{i}_qty"] = controller.entry_buckets.get(bucket_id).qty
+            row[f"entry_bucket_{i}_amount"] = controller.entry_buckets.get(bucket_id).amount
+            row[f"entry_bucket_{i}_side"] = controller.entry_buckets.get(bucket_id).side
+            row[f"entry_bucket_{i}_status"] = controller.entry_buckets.get(bucket_id).status
+            row[f"entry_bucket_{i}_is_last"] = controller.entry_buckets.get(bucket_id).is_last
+            row[f"entry_bucket_{i}_is_market"] = controller.entry_buckets.get(bucket_id).is_market
+
+        if not executors_states.get(bucket_id):
+            row[f"entry_{i}_executor_id"] = None
+            row[f"entry_{i}_executor_status"] = None
+            row[f"entry_{i}_executor_is_active_and_not_filled"] = None
+            row[f"entry_{i}_executor_is_full_filled"] = None
+            row[f"entry_{i}_executor_is_terminated"] = None
+            row[f"entry_{i}_executor_avg_entry_price"] = None
+            row[f"entry_{i}_executor_qty"] = None
+            row[f"entry_{i}_executor_amount"] = None
+        else:
+            row[f"entry_{i}_executor_id"] = executors_states.get(bucket_id).id
+            row[f"entry_{i}_executor_status"] = executors_states.get(bucket_id).status
+            row[f"entry_{i}_executor_is_active_and_not_filled"] = executors_states.get(bucket_id).is_active_and_not_filled
+            row[f"entry_{i}_executor_is_full_filled"] = executors_states.get(bucket_id).is_full_filled
+            row[f"entry_{i}_executor_is_terminated"] = executors_states.get(bucket_id).is_terminated
+            row[f"entry_{i}_executor_avg_entry_price"] = executors_states.get(bucket_id).average_entry_price
+            row[f"entry_{i}_executor_qty"] = executors_states.get(bucket_id).qty
+            row[f"entry_{i}_executor_amount"] = executors_states.get(bucket_id).amount
+
+        bucket_id = f"{controller.cycle_num}_exit_{i}"
+        if not controller.exit_buckets.get(f"{controller.cycle_num}_exit_{i}"):
+            row[f"exit_bucket_{i}_price"] = None
+            row[f"exit_bucket_{i}_qty"] = None
+            row[f"exit_bucket_{i}_amount"] = None
+            row[f"exit_bucket_{i}_side"] = None
+            row[f"exit_bucket_{i}_status"] = None
+            row[f"exit_bucket_{i}_is_last"] = None
+            row[f"exit_bucket_{i}_is_market"] = None
+        else:
+            row[f"exit_bucket_{i}_price"] = controller.exit_buckets.get(f"{controller.cycle_num}_exit_{i}").price
+            row[f"exit_bucket_{i}_qty"] = controller.exit_buckets.get(f"{controller.cycle_num}_exit_{i}").qty
+            row[f"exit_bucket_{i}_amount"] = controller.exit_buckets.get(f"{controller.cycle_num}_exit_{i}").amount
+            row[f"exit_bucket_{i}_side"] = controller.exit_buckets.get(f"{controller.cycle_num}_exit_{i}").side
+            row[f"exit_bucket_{i}_status"] = controller.exit_buckets.get(f"{controller.cycle_num}_exit_{i}").status
+            row[f"exit_bucket_{i}_is_last"] = controller.exit_buckets.get(f"{controller.cycle_num}_exit_{i}").is_last
+            row[f"exit_bucket_{i}_is_market"] = controller.exit_buckets.get(f"{controller.cycle_num}_exit_{i}").is_market
+
+        if not executors_states.get(bucket_id):
+            row[f"exit_{i}_executor_id"] = None
+            row[f"exit_{i}_executor_status"] = None
+            row[f"exit_{i}_executor_is_active_and_not_filled"] = None
+            row[f"exit_{i}_executor_is_full_filled"] = None
+            row[f"exit_{i}_executor_is_terminated"] = None
+            row[f"exit_{i}_executor_avg_entry_price"] = None
+            row[f"exit_{i}_executor_qty"] = None
+            row[f"exit_{i}_executor_amount"] = None
+        else:
+            row[f"exit_{i}_executor_id"] = executors_states.get(bucket_id).id
+            row[f"exit_{i}_executor_status"] = executors_states.get(bucket_id).status
+            row[f"exit_{i}_executor_is_active_and_not_filled"] = executors_states.get(bucket_id).is_active_and_not_filled
+            row[f"exit_{i}_executor_is_full_filled"] = executors_states.get(bucket_id).is_full_filled
+            row[f"exit_{i}_executor_is_terminated"] = executors_states.get(bucket_id).is_terminated
+            row[f"exit_{i}_executor_avg_entry_price"] = executors_states.get(bucket_id).average_entry_price
+            row[f"exit_{i}_executor_qty"] = executors_states.get(bucket_id).qty
+            row[f"exit_{i}_executor_amount"] = executors_states.get(bucket_id).amount
+
     if not os.path.exists(filename):
         with open(filename, "w") as f:
-            f.write("timestamp,connector_name,side,price,qty,status\n")
+            writer = csv.writer(f)
+            writer.writerow(headers)
+            writer.writerow(row.values())
+    else:
+        with open(filename, "a") as f:
+            writer = csv.writer(f)
+            writer.writerow(row.values())
