@@ -279,7 +279,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
 
     def close_position(self):
         self.cumulative_delta = self.cumulative_delta * (1 + self._current_delta)
-        self.current_amount_quote = self.current_amount_quote * (1 + self._current_delta)
+        self.current_amount_quote = self.current_amount_quote + self._current_delta * self.config.total_amount_quote
         self._position_open_price_one = 0.0
         self._position_open_price_two = 0.0
         self._total_positions_closed_count += 1
