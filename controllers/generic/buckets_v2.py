@@ -637,20 +637,20 @@ class BucketsV2Controller(ControllerBase):
                 "short_activation_bounds": mid_price * (1 + self.config.activation_bounds),
             }
         )
-        save_controller_state_to_file(self)
+        # save_controller_state_to_file(self)
 
     def _determine_entry_executors(self):
         actions = []
         executors_states = self.executors_states
-        self.logger().info(f"DETERMINE ENTRY EXECUTORS ({len(executors_states)})")
-        self.logger().info(f"Executors: {self.executors_info}")
+        # self.logger().info(f"DETERMINE ENTRY EXECUTORS ({len(executors_states)})")
+        # self.logger().info(f"Executors: {self.executors_info}")
         for bucket_id, bucket in self.entry_buckets.items():
             executor_state = executors_states.get(bucket_id)
 
             if bucket.status == GridBucketStatus.FILLED:
                 if executor_state and not executor_state.is_terminated:
-                    self.logger().info(f"STOP FILLED ENTRY EXECUTOR. {bucket}")
-                    self.logger().info(f"EXECUTOR STATE: {executor_state}")
+                    # self.logger().info(f"STOP FILLED ENTRY EXECUTOR. {bucket}")
+                    # self.logger().info(f"EXECUTOR STATE: {executor_state}")
                     actions.append(
                         StopExecutorAction(
                             controller_id=self.config.id,
@@ -764,8 +764,8 @@ class BucketsV2Controller(ControllerBase):
 
             # create new bucket executor
             self.logger().info(f"NEW EXIT EXECUTOR. {bucket}")
-            executors_str = "\n".join([f"{k}: {v}" for k, v in executors_states.items()])
-            self.logger().info(f"Executors:\n{executors_str}")
+            # executors_str = "\n".join([f"{k}: {v}" for k, v in executors_states.items()])
+            # self.logger().info(f"Executors:\n{executors_str}")
             actions.append(
                 CreateExecutorAction(
                     controller_id=self.config.id,
