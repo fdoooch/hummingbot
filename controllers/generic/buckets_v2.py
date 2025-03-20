@@ -1,6 +1,5 @@
 from decimal import Decimal
 from enum import Enum
-from tkinter import FALSE
 from typing import Any, Dict, List, Set
 from pydantic import BaseModel, Field, validator
 import math
@@ -384,9 +383,9 @@ class BucketsV2Controller(ControllerBase):
 
         for bucket in self.config.exit_buckets:
             bucket_id = f"{self.cycle_num}_{bucket.id}"
-            if self.exit_buckets.get(bucket_id) and self.exit_buckets[bucket_id].status == GridBucketStatus.FILLED:
-                buckets[bucket_id] = self.exit_buckets[bucket_id]
-                continue
+            # if self.exit_buckets.get(bucket_id) and self.exit_buckets[bucket_id].status == GridBucketStatus.FILLED:
+            #     buckets[bucket_id] = self.exit_buckets[bucket_id]
+            #     continue
 
             if self.exit_side == TradeType.BUY:
                 bucket_price = average_entry_price * (1 - bucket.profit_percentage / 100)
@@ -595,6 +594,14 @@ class BucketsV2Controller(ControllerBase):
             )
             return None
 
+        if self._is_new_entry_bucket_filled:
+            self.exit_buckets = self._calculate_exit_buckets()
+            self._is_new_entry_bucket_filled = False
+
+        if self._is_new_exit_bucket_filled:
+            ...
+            self._is_new_exit_bucket_filled = False
+
         avg_entry_price = self.avg_entry_price
         self.entry_buckets = self._handle_executors_updates(self.entry_buckets)
         # self.logger().info(f"ENTRY BUCKETS after handle executors: {self.entry_buckets}")
@@ -774,6 +781,25 @@ class BucketsV2Controller(ControllerBase):
 
         return actions
 
+    def stop_all_active_exit_executors(self):
+        actions = []
+        executors_states = self.executors_states
+        for bucket_id, bucket in self.exit_buckets.items():
+            executor_state = executors_states.get(bucket_id)
+            if executor_state and not executor_state.is_terminated:
+                self.logger().info(f"STOP EXIT EXECUTOR (stop all). {bucket}")
+                self.logger().info(f"EXECUTOR STATE: {executor_state}")
+                actions.append(
+                    StopExecutorAction(
+                        controller_id=self.config.id,
+                        executor_id=executor_state.id,
+                        keep_position=executor_state.is_full_filled,
+                    )
+                )
+
+        return actions
+
+
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """
         Determine actions based on the provided executor handler report.
@@ -784,20 +810,21 @@ class BucketsV2Controller(ControllerBase):
 
         actions = self.executors_actions
         if self.entry_buckets == {}:
+            # первый тик нового цикла
             self.entry_buckets = self._calculate_entry_buckets()
             actions.extend(self._determine_entry_executors())
+
         # actions.extend(self.determine_create_executor_actions())
         # actions.extend(self.determine_stop_executor_actions())
         if self._is_new_entry_bucket_filled:
+            actions.extend(self.stop_all_active_exit_executors())
             actions.extend(self._determine_entry_executors())
-            actions.extend(self._determine_exit_executors())
+ 
 
         elif self._is_new_exit_bucket_filled or self.has_inactive_exit_bucket:
             actions.extend(self._determine_exit_executors())
 
         self.executors_actions = []
-        self._is_new_entry_bucket_filled = False
-        self._is_new_exit_bucket_filled = False
         return actions
 
     # def determine_create_executor_actions(self) -> List[ExecutorAction]:
