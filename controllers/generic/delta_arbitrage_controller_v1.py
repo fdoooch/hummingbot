@@ -16,7 +16,6 @@ from hummingbot.client.config.config_data_types import ClientFieldData
 
 
 class DeltaArbitrageControllerV1Config(ControllerConfigBase):
-    model_config = {"extra": "allow"}
     controller_name: str = "delta_arbitrage_controller_v1"
     candles_config: List[CandlesConfig] = Field(
         default="bybit_perpetual.BTC-USDT.1m.1000:bybit_perpetual.ETH-USDT.1m.1000:",
@@ -59,7 +58,6 @@ class DeltaArbitrageControllerV1Config(ControllerConfigBase):
             prompt=lambda e: "Enter the period to close position by timeout in seconds (60000): ", prompt_on_new=True
         ),
     )
-
     # Ratio thresholds
     open_position_lower_threshold: float = Field(
         default=8.0,
@@ -80,7 +78,10 @@ class DeltaArbitrageControllerV1Config(ControllerConfigBase):
     fee_decimal: float = Field(
         default=0.001, client_data=ClientFieldData(prompt=lambda e: "Enter the fee decimal: ", prompt_on_new=True)
     )
-    
+    total_amount_quote: float = Field(
+        default=100.0,
+        client_data=ClientFieldData(prompt=lambda e: "Enter the total amount in quote currency: ", prompt_on_new=True)
+    )
     manual_kill_switch: bool = Field(
         default=False,
         client_data=ClientFieldData(prompt=lambda e: "Enable manual kill switch? (True/False): ", prompt_on_new=True)
