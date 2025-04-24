@@ -53,18 +53,29 @@ class DeltaArbitrageControllerV1Config(ControllerConfigBase):
         client_data=ClientFieldData(prompt=lambda e: "Enter the reference price window size: ", prompt_on_new=True),
     )
     position_max_duration_sec: int = Field(
-        default=60000, # 1000 minutes
-        client_data=ClientFieldData(prompt=lambda e: "Enter the period to close position by timeout in seconds (60000): ", prompt_on_new=True),
+        default=60000,  # 1000 minutes
+        client_data=ClientFieldData(
+            prompt=lambda e: "Enter the period to close position by timeout in seconds (60000): ", prompt_on_new=True
+        ),
     )
 
     # Ratio thresholds
-    open_position_threshold: float = Field(
+    open_position_lower_threshold: float = Field(
         default=8.0,
-        client_data=ClientFieldData(prompt=lambda e: "Enter the open short threshold: ", prompt_on_new=True),
-    )  # Sell BTC/Buy ETH when BTC/ETH >= 8
-    close_position_threshold: float = Field(
-        default=5.0, client_data=ClientFieldData(prompt=lambda e: "Enter the close short threshold: ", prompt_on_new=True)
-    )  # Exit BTC short/ETH long when ratio reaches <=5
+        client_data=ClientFieldData(prompt=lambda e: "Enter the open lower threshold: ", prompt_on_new=True),
+    )  # Sell BTC/Buy ETH when 10 >= BTC/ETH >= 8
+    open_position_upper_threshold: float = Field(
+        default=10.0,
+        client_data=ClientFieldData(prompt=lambda e: "Enter the open upper threshold: ", prompt_on_new=True),
+    )
+    take_profit_threshold: float = Field(
+        default=5.0,
+        client_data=ClientFieldData(prompt=lambda e: "Enter the take profit threshold: ", prompt_on_new=True),
+    )  # Exit BTC short/ETH long when profit reaches >= 0.005
+    stop_loss_threshold: float = Field(
+        default=3.0, client_data=ClientFieldData(prompt=lambda e: "Enter the stop loss threshold: ", prompt_on_new=True)
+    )  # Exit BTC short/ETH long when loss reaches <= -0.002
+
     fee_decimal: float = Field(
         default=0.001, client_data=ClientFieldData(prompt=lambda e: "Enter the fee decimal: ", prompt_on_new=True)
     )
@@ -127,7 +138,6 @@ class DeltaArbitrageControllerV1(ControllerBase):
     def config_total_amount_quote(self) -> float:
         return float(self.config.total_amount_quote)
 
-
     def __init__(self, config: DeltaArbitrageControllerV1Config, *args, **kwargs):
         self.logger().warning(f"Initializing Delta Arbitrage Controller with config: {config}")
         super().__init__(config, *args, **kwargs)
@@ -153,6 +163,8 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self._total_positions_opened_count: int = 0
         self._total_positions_closed_count: int = 0
         self._positions_closed_by_timeout_count: int = 0
+        self._positions_closed_by_stop_loss_count: int = 0
+        self._positions_closed_by_take_profit_count: int = 0
         self.market_data_provider.initialize_rate_sources(
             [
                 ConnectorPair(connector_name=config.connector_one, trading_pair=config.trading_pair_one),
@@ -174,6 +186,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
         """
         current_time = int(time.time())
         self._current_position_opened_at = 0
+        self._has_active_position = False
         self.update_reference_data(current_time)
         return None
 
@@ -183,7 +196,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
         """
         self._reference_delta = self.calculate_reference_relative_delta()
         self._reference_delta_updated_at = current_time
-        
+
         REFERENCE_PRICES_UPDATE_INTERVAL = 60
         time_since_reference_updated = current_time - self._reference_prices_updated_at
         if time_since_reference_updated <= REFERENCE_PRICES_UPDATE_INTERVAL:
@@ -224,7 +237,6 @@ class DeltaArbitrageControllerV1(ControllerBase):
             fee_decimal=self.fee_decimal,
         )
 
-
     def calculate_current_relative_delta(self) -> float:
         return self.calculate_relative_delta_short(
             init_price_one=self._position_open_price_one,
@@ -249,17 +261,35 @@ class DeltaArbitrageControllerV1(ControllerBase):
         pair_one_ratio = last_price_one / init_price_one
         pair_two_ratio = last_price_two / init_price_two
 
-        delta = (pair_two_ratio - pair_one_ratio)
+        delta = pair_two_ratio - pair_one_ratio
         fee = fee_decimal * (pair_one_ratio + pair_two_ratio + 2)
         return delta - fee
 
-
     def is_position_open_conditions(self) -> bool:
-        return self._reference_delta > self.config.open_position_threshold
+        return (
+            self.config.open_position_lower_threshold
+            <= self._reference_delta
+            <= self.config.open_position_upper_threshold
+        )
 
-    def is_position_close_conditions(self) -> bool:
-        return self._current_delta > self.config.close_position_threshold
+    def check_and_handle_stop_loss(self) -> None:
+        if not self._has_active_position:
+            return None
+        if self.current_delta <= self.config.stop_loss_threshold:
+            self.on_stop_loss()
+        return None
 
+    def check_and_handle_take_profit(self) -> None:
+        if not self._has_active_position:
+            return None
+        if self.current_delta >= self.config.take_profit_threshold:
+            self.on_take_profit()
+        return None
+
+    def on_take_profit(self):
+        self.close_position()
+        self._positions_closed_by_take_profit_count += 1
+        self.on_new_cycle_start()
 
     def check_and_handle_position_timeout(self, current_time: int) -> None:
         if not self._has_active_position:
@@ -274,6 +304,10 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self._positions_closed_by_timeout_count += 1
         self.on_new_cycle_start()
 
+    def on_stop_loss(self):
+        self.close_position()
+        self._positions_closed_by_stop_loss_count += 1
+        self.on_new_cycle_start()
 
     def open_position(self):
         self._position_open_price_one = self.pair_one_current_price
@@ -281,7 +315,6 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self._current_position_opened_at = int(time.time())
         self._total_positions_opened_count += 1
         self._has_active_position = True
-
 
     def close_position(self):
         self.cumulative_delta = self.cumulative_delta * (1 + self._current_delta)
@@ -291,7 +324,6 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self._total_positions_closed_count += 1
         self._current_position_opened_at = 0
         self._has_active_position = False
-
 
     def create_position_config(
         self,
@@ -313,7 +345,6 @@ class DeltaArbitrageControllerV1(ControllerBase):
             time_limit_seconds=self.config.time_limit_seconds if position_action == PositionAction.OPEN else None,
             connector_name=self.config.first_pair.connector_name,  # Both pairs use same connector (Binance)
         )
-
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """Determine what positions to open based on the BTC/ETH ratio"""
@@ -440,12 +471,10 @@ class DeltaArbitrageControllerV1(ControllerBase):
 
         elif self.is_position_open_conditions():
             self.open_position()
-        
+
         save_controller_state_to_file(self, tick_current_time)
 
         return None
-
-    
 
     def to_format_status(self) -> List[str]:
         """Format the current status for display"""
@@ -456,7 +485,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
             f"Reference Price Two: {self.reference_price_two}",
             f"Current Delta: {self._current_delta}",
             f"Reference Delta: {self._reference_delta}",
-            f"Position open threshold: {self.config.open_position_threshold}",
+            f"Position open threshold: {self.config.open_position_lower_threshold}",
             f"Position close threshold: {self.config.close_position_threshold}",
             f"Has active position: {self._has_active_position}",
             f"Cumulative delta: {self.cumulative_delta}",
@@ -466,14 +495,16 @@ class DeltaArbitrageControllerV1(ControllerBase):
             f"Current position opened at: {self._current_position_opened_at}",
             f"Reference delta updated at: {self._reference_delta_updated_at}",
             f"Reference prices updated at: {self._reference_prices_updated_at}",
-            f"Current amount quote: {self.current_amount_quote}"
+            f"Current amount quote: {self.current_amount_quote}",
         ]
 
         return status
 
 
 def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timestamp: int):
-    filename = f"logs/controller_state_history_{controller.config.controller_name}_{controller.config.connector_one}.csv"
+    filename = (
+        f"logs/controller_state_history_{controller.config.controller_name}_{controller.config.connector_one}.csv"
+    )
     headers = [
         "timestamp",
         "pair_one",
@@ -494,7 +525,7 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "total_positions_closed_count",
         "positions_closed_by_timeout_count",
         "cumulative_delta",
-        "current_amount_quote"
+        "current_amount_quote",
     ]
 
     row = {
@@ -510,14 +541,14 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "reference_delta": controller._reference_delta,
         "current_delta": controller._current_delta,
         "has_active_position": controller._has_active_position,
-        "position_open_threshold": controller.config.open_position_threshold,
+        "position_open_threshold": controller.config.open_position_lower_threshold,
         "position_close_threshold": controller.config.close_position_threshold,
         "current_position_opened_at": controller._current_position_opened_at,
         "total_positions_opened_count": controller._total_positions_opened_count,
         "total_positions_closed_count": controller._total_positions_closed_count,
         "positions_closed_by_timeout_count": controller._positions_closed_by_timeout_count,
         "cumulative_delta": controller.cumulative_delta,
-        "current_amount_quote": controller.current_amount_quote
+        "current_amount_quote": controller.current_amount_quote,
     }
 
     if not os.path.exists(filename):
@@ -529,5 +560,3 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         with open(filename, "a") as f:
             writer = csv.writer(f)
             writer.writerow(row.values())
-
-
