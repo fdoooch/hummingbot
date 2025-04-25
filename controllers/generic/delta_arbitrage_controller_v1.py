@@ -283,14 +283,14 @@ class DeltaArbitrageControllerV1(ControllerBase):
     def check_and_handle_stop_loss(self) -> None:
         if not self._has_active_position:
             return None
-        if self.current_delta <= self.config.stop_loss_threshold:
+        if self._current_delta <= self.config.stop_loss_threshold:
             self.on_stop_loss()
         return None
 
     def check_and_handle_take_profit(self) -> None:
         if not self._has_active_position:
             return None
-        if self.current_delta >= self.config.take_profit_threshold:
+        if self._current_delta >= self.config.take_profit_threshold:
             self.on_take_profit()
         return None
 
