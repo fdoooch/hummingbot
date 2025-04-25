@@ -1,6 +1,6 @@
 from decimal import Decimal
 from typing import Dict, List, Set
-from pydantic import Field, validator
+from pydantic import Field, validator, ConfigDict
 import time
 import csv
 import os
@@ -16,7 +16,7 @@ from hummingbot.client.config.config_data_types import ClientFieldData
 
 
 class DeltaArbitrageControllerV1Config(ControllerConfigBase):
-    model_config = {"extra": "allow"}
+    model_config = ConfigDict(extra="allow")
     controller_name: str = "delta_arbitrage_controller_v1"
     candles_config: List[CandlesConfig] = Field(
         default="bybit_perpetual.BTC-USDT.1m.1000:bybit_perpetual.ETH-USDT.1m.1000:",
