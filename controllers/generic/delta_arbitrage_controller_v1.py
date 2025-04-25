@@ -13,6 +13,65 @@ from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction,
 from hummingbot.core.data_type.common import OrderType, PositionAction, TradeType
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.client.config.config_data_types import ClientFieldData
+from pydantic import BaseModel
+from hummingbot.strategy_v2.models.executors import CloseType
+from hummingbot.strategy_v2.models.base import RunnableStatus
+
+
+class ExecutorState(BaseModel):
+    id: str
+    timestamp: float
+    type: str
+    close_timestamp: float | None
+    close_type: CloseType | None
+    status: RunnableStatus
+    config: PositionExecutorConfig
+    net_pnl_pct: Decimal
+    net_pnl_quote: Decimal
+    cum_fees_quote: Decimal
+    filled_amount_quote: Decimal
+    is_active: bool
+    is_trading: bool
+    custom_info: dict
+    controller_id: str | None = None
+
+    @property
+    def level_id(self) -> str:
+        return self.custom_info.get("level_id", "unknown_level_id")
+
+    @property
+    def is_active_and_not_filled(self) -> bool:
+        return self.is_active and not self.is_trading
+
+    @property
+    def is_full_filled(self) -> bool:
+        return self.is_active and self.is_trading
+
+    @property
+    def average_entry_price(self) -> float:
+        return float(self.custom_info.get("current_position_average_price", 0.0))
+
+    @property
+    def amount(self) -> float:
+        return float(self.filled_amount_quote)
+
+    @property
+    def qty(self) -> float:
+        if self.average_entry_price == 0:
+            return 0.0
+        return float(self.amount / self.average_entry_price)
+
+    @property
+    def config_qty(self) -> float:
+        return float(self.config.amount)
+
+    @property
+    def config_entry_price(self) -> float:
+        return float(self.config.entry_price)
+
+    @property
+    def is_terminated(self) -> bool:
+        return self.status in [RunnableStatus.TERMINATED, RunnableStatus.SHUTTING_DOWN]
 
 
 class DeltaArbitrageControllerV1Config(ControllerConfigBase):
@@ -145,6 +204,12 @@ class DeltaArbitrageControllerV1(ControllerBase):
     @property
     def config_total_amount_quote(self) -> float:
         return float(self.config.total_amount_quote)
+
+
+    @property
+    def executors_states(self) -> dict[str, ExecutorState]:
+        executors_states = {ex.custom_info["level_id"]: ExecutorState(**ex.to_dict()) for ex in self.executors_info}
+        return executors_states
 
     def __init__(self, config: DeltaArbitrageControllerV1Config, *args, **kwargs):
         self.logger().warning(f"Initializing Delta Arbitrage Controller with config: {config}")
