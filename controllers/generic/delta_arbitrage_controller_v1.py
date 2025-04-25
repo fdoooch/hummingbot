@@ -474,8 +474,8 @@ class DeltaArbitrageControllerV1(ControllerBase):
 
         if self._has_active_position:
             self._current_delta = self.calculate_current_relative_delta()
-            if self.is_position_close_conditions():
-                self.close_position()
+            self.check_and_handle_stop_loss()
+            self.check_and_handle_take_profit()
 
         elif self.is_position_open_conditions():
             self.open_position()
@@ -488,18 +488,20 @@ class DeltaArbitrageControllerV1(ControllerBase):
         """Format the current status for display"""
         status = [
             f"{self.config.trading_pair_one} price: {self.pair_one_current_price}",
-            f"Reference Price One: {self.reference_price_one}",
             f"{self.config.trading_pair_two} price: {self.pair_two_current_price}",
-            f"Reference Price Two: {self.reference_price_two}",
             f"Current Delta: {self._current_delta}",
             f"Reference Delta: {self._reference_delta}",
-            f"Position open threshold: {self.config.open_position_lower_threshold}",
-            f"Position close threshold: {self.config.close_position_threshold}",
+            f"Position open lower threshold: {self.config.open_position_lower_threshold}",
+            f"Position open upper threshold: {self.config.open_position_upper_threshold}",
+            f"Position take profit threshold: {self.config.take_profit_threshold}",
+            f"Position stop loss threshold: {self.config.stop_loss_threshold}",
             f"Has active position: {self._has_active_position}",
             f"Cumulative delta: {self.cumulative_delta}",
             f"Total positions opened count: {self._total_positions_opened_count}",
             f"Total positions closed count: {self._total_positions_closed_count}",
             f"Positions closed by timeout count: {self._positions_closed_by_timeout_count}",
+            f"Positions closed by take profit count: {self._positions_closed_by_take_profit_count}",
+            f"Positions closed by stop loss count: {self._positions_closed_by_stop_loss_count}",
             f"Current position opened at: {self._current_position_opened_at}",
             f"Reference delta updated at: {self._reference_delta_updated_at}",
             f"Reference prices updated at: {self._reference_prices_updated_at}",
@@ -526,12 +528,16 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "reference_delta",
         "current_delta",
         "has_active_position",
-        "position_open_threshold",
-        "position_close_threshold",
+        "position_open_lower_threshold",
+        "position_open_upper_threshold",
+        "position_take_profit_threshold",
+        "position_stop_loss_threshold",
         "current_position_opened_at",
         "total_positions_opened_count",
         "total_positions_closed_count",
         "positions_closed_by_timeout_count",
+        "positions_closed_by_take_profit_count",
+        "positions_closed_by_stop_loss_count",
         "cumulative_delta",
         "current_amount_quote",
     ]
@@ -549,8 +555,10 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "reference_delta": controller._reference_delta,
         "current_delta": controller._current_delta,
         "has_active_position": controller._has_active_position,
-        "position_open_threshold": controller.config.open_position_lower_threshold,
-        "position_close_threshold": controller.config.close_position_threshold,
+        "position_open_lower_threshold": controller.config.open_position_lower_threshold,
+        "position_open_upper_threshold": controller.config.open_position_upper_threshold,
+        "position_take_profit_threshold": controller.config.take_profit_threshold,
+        "position_stop_loss_threshold": controller.config.stop_loss_threshold,
         "current_position_opened_at": controller._current_position_opened_at,
         "total_positions_opened_count": controller._total_positions_opened_count,
         "total_positions_closed_count": controller._total_positions_closed_count,
