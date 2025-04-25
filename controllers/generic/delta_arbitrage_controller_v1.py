@@ -217,6 +217,9 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self.config = config
         # self.config.position_max_duration_sec = 1000 * 60 # 1000 minutes
         self._has_active_position = False
+        self._is_position_entry_in_progress = False
+        self._is_take_profit_in_progress = False
+        self._is_stop_loss_in_progress = False
         self._is_first_tick = True
         self.pair_one_current_price: float = 0.0
         self.pair_two_current_price: float = 0.0
@@ -260,6 +263,9 @@ class DeltaArbitrageControllerV1(ControllerBase):
         current_time = int(time.time())
         self._current_position_opened_at = 0
         self._has_active_position = False
+        self._is_position_entry_in_progress = False
+        self._is_take_profit_in_progress = False
+        self._is_stop_loss_in_progress = False
         self.update_reference_data(current_time)
         return None
 
@@ -358,6 +364,22 @@ class DeltaArbitrageControllerV1(ControllerBase):
         if self._current_delta >= self.config.take_profit_threshold:
             self.on_take_profit()
         return None
+
+    def activate_position_entry(self):
+        # create sell executor for pair One
+        # create buy executor for pair Two
+        self._is_position_entry_in_progress = True
+
+    def activate_take_profit(self):
+        # create buy executor for pair One
+        # create sell executor for pair Two
+        self._is_take_profit_in_progress = True
+
+
+    def activate_stop_loss(self):
+        # create sell executor for pair One
+        # create buy executor for pair Two
+        self._is_stop_loss_in_progress = True
 
     def on_take_profit(self):
         self.close_position()
