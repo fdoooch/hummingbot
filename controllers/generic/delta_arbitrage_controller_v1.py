@@ -563,6 +563,8 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "total_positions_opened_count": controller._total_positions_opened_count,
         "total_positions_closed_count": controller._total_positions_closed_count,
         "positions_closed_by_timeout_count": controller._positions_closed_by_timeout_count,
+        "positions_closed_by_take_profit_count": controller._positions_closed_by_take_profit_count,
+        "positions_closed_by_stop_loss_count": controller._positions_closed_by_stop_loss_count,
         "cumulative_delta": controller.cumulative_delta,
         "current_amount_quote": controller.current_amount_quote,
     }
