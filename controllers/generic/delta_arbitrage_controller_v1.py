@@ -4,19 +4,34 @@ from pydantic import Field, validator, ConfigDict
 import time
 import csv
 import os
+import math
+from enum import Enum
 
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
-from hummingbot.core.data_type.common import PriceType
+from hummingbot.core.data_type.common import PriceType, TradeType
 from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
-from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
-from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction
-from hummingbot.core.data_type.common import OrderType, PositionAction, TradeType
+from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig
+from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
+from hummingbot.core.data_type.common import OrderType, PositionAction
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.client.config.config_data_types import ClientFieldData
 from pydantic import BaseModel
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.base import RunnableStatus
 
+
+PAIR_ONE_ENTRY_EXECUTOR_ID = "PAIR_ONE_ENTRY"
+PAIR_TWO_ENTRY_EXECUTOR_ID = "PAIR_TWO_ENTRY"
+
+
+
+class PositionStatus(Enum):
+    NO_POSITION = "no_position"
+    ENTRY_IN_PROGRESS = "entry_in_progress"
+    IN_POSITION = "in_position"
+    SL_IN_PROGRESS = "sl_in_progress"
+    TP_IN_PROGRESS = "tp_in_progress"
+    TIMEOUT_EXIT_IN_PROGRESS = "timeout_exit_in_progress"
 
 class ExecutorState(BaseModel):
     id: str
@@ -71,7 +86,10 @@ class ExecutorState(BaseModel):
 
     @property
     def is_terminated(self) -> bool:
-        return self.status in [RunnableStatus.TERMINATED, RunnableStatus.SHUTTING_DOWN]
+        return self.status in [
+            RunnableStatus.TERMINATED, 
+            # RunnableStatus.SHUTTING_DOWN
+        ]
 
 
 class DeltaArbitrageControllerV1Config(ControllerConfigBase):
@@ -216,13 +234,16 @@ class DeltaArbitrageControllerV1(ControllerBase):
         super().__init__(config, *args, **kwargs)
         self.config = config
         # self.config.position_max_duration_sec = 1000 * 60 # 1000 minutes
-        self._has_active_position = False
-        self._is_position_entry_in_progress = False
-        self._is_take_profit_in_progress = False
-        self._is_stop_loss_in_progress = False
+        self.position_status = PositionStatus.NO_POSITION
+        # self._has_active_position = False
+        # self._is_position_entry_in_progress = False
+        # self._is_take_profit_in_progress = False
+        # self._is_stop_loss_in_progress = False
         self._is_first_tick = True
         self.pair_one_current_price: float = 0.0
         self.pair_two_current_price: float = 0.0
+        self.pair_one_current_qty: float = 0.0
+        self.pair_two_current_qty: float = 0.0
         self._current_ratio: float = 0.0
         self.reference_price_one: float = 0.0
         self.reference_price_two: float = 0.0
@@ -235,24 +256,28 @@ class DeltaArbitrageControllerV1(ControllerBase):
         self._reference_delta_updated_at: int = 0
         self.current_amount_quote: float = float(config.total_amount_quote)
         self._current_position_opened_at: int = 0
+        self._current_position_timeout_at: int = 0
         self.cumulative_delta: float = 1.0
         self._total_positions_opened_count: int = 0
         self._total_positions_closed_count: int = 0
         self._positions_closed_by_timeout_count: int = 0
         self._positions_closed_by_stop_loss_count: int = 0
         self._positions_closed_by_take_profit_count: int = 0
+        self.executors_actions: list[ExecutorAction] = []
         self.market_data_provider.initialize_rate_sources(
             [
                 ConnectorPair(connector_name=config.connector_one, trading_pair=config.trading_pair_one),
                 ConnectorPair(connector_name=config.connector_two, trading_pair=config.trading_pair_two),
             ]
         )
+        self._pair_one_active_executor_id: str | None = None
+        self._pair_two_active_executor_id: str | None = None
 
     def start(self):
         """
         Действия, выпоенные при старте контроллера, на первом тике
         """
-        self.logger().info("Starting Ratio Trading Controller...")
+        self.logger().info("Starting Delta Arbitrage Controller...")
         super().start()
         self.on_new_cycle_start()
 
@@ -260,12 +285,15 @@ class DeltaArbitrageControllerV1(ControllerBase):
         """
         Цикл завершается по времени или после первой закрытой сделки
         """
+        self.logger().info("Starting new cycle...")
+        for executor in self.executors_info:
+            self.logger().info(f"Executor {executor}")
         current_time = int(time.time())
         self._current_position_opened_at = 0
-        self._has_active_position = False
-        self._is_position_entry_in_progress = False
-        self._is_take_profit_in_progress = False
-        self._is_stop_loss_in_progress = False
+        self._current_position_timeout_at = 0
+        self.position_status = PositionStatus.NO_POSITION
+        self._pair_one_active_executor_id: str | None = None
+        self._pair_two_active_executor_id: str | None = None
         self.update_reference_data(current_time)
         return None
 
@@ -317,6 +345,11 @@ class DeltaArbitrageControllerV1(ControllerBase):
         )
 
     def calculate_current_relative_delta(self) -> float:
+        # self.logger().info(f"Current relative delta: {self._current_delta}")
+        # self.logger().info(f"Position open price one: {self._position_open_price_one}")
+        # self.logger().info(f"Position open price two: {self._position_open_price_two}")
+        # self.logger().info(f"Pair one current price: {self.pair_one_current_price}")
+        # self.logger().info(f"Pair two current price: {self.pair_two_current_price}\n\n")
         return self.calculate_relative_delta_short(
             init_price_one=self._position_open_price_one,
             last_price_one=self.pair_one_current_price,
@@ -344,207 +377,298 @@ class DeltaArbitrageControllerV1(ControllerBase):
         fee = fee_decimal * (pair_one_ratio + pair_two_ratio + 2)
         return delta - fee
 
-    def is_position_open_conditions(self) -> bool:
+
+    def _is_position_open_conditions(self) -> bool:
         return (
             self.config.open_position_lower_threshold
             <= self._reference_delta
             <= self.config.open_position_upper_threshold
         )
 
-    def check_and_handle_stop_loss(self) -> None:
-        if not self._has_active_position:
-            return None
+
+    def _check_and_handle_stop_loss(self) -> None:
         if self._current_delta <= self.config.stop_loss_threshold:
-            self.on_stop_loss()
+            self._start_stop_loss_exit_process()
         return None
 
-    def check_and_handle_take_profit(self) -> None:
-        if not self._has_active_position:
-            return None
+
+    def _start_stop_loss_exit_process(self):
+        self.logger().info("Starting stop loss exit process...")
+        self._start_close_position_process()
+        self.position_status = PositionStatus.SL_IN_PROGRESS
+        return None
+
+
+    def _check_and_handle_take_profit(self) -> None:
         if self._current_delta >= self.config.take_profit_threshold:
-            self.on_take_profit()
+            self._start_take_profit_exit_process()
         return None
 
-    def activate_position_entry(self):
-        # create sell executor for pair One
-        # create buy executor for pair Two
-        self._is_position_entry_in_progress = True
 
-    def activate_take_profit(self):
-        # create buy executor for pair One
-        # create sell executor for pair Two
-        self._is_take_profit_in_progress = True
-
-
-    def activate_stop_loss(self):
-        # create sell executor for pair One
-        # create buy executor for pair Two
-        self._is_stop_loss_in_progress = True
-
-    def on_take_profit(self):
-        self.close_position()
-        self._positions_closed_by_take_profit_count += 1
-        self.on_new_cycle_start()
-
-    def check_and_handle_position_timeout(self, current_time: int) -> None:
-        if not self._has_active_position:
-            return None
-        position_duration = current_time - self._current_position_opened_at
-        if position_duration > self.config.position_max_duration_sec:
-            self.on_position_timeout()
+    def _start_take_profit_exit_process(self):
+        self.logger().info("Starting take profit exit process...")
+        self._start_close_position_process()
+        self.position_status = PositionStatus.TP_IN_PROGRESS
         return None
 
-    def on_position_timeout(self):
-        self.close_position()
-        self._positions_closed_by_timeout_count += 1
-        self.on_new_cycle_start()
 
-    def on_stop_loss(self):
-        self.close_position()
-        self._positions_closed_by_stop_loss_count += 1
-        self.on_new_cycle_start()
+    def _start_position_entry_process(self):
+        # create sell executor for pair One
+        self.logger().info("Starting position entry process...")
+        self.executors_actions.append(
+                CreateExecutorAction(
+                    controller_id=self.config.id,
+                    executor_config=self.get_pair_one_market_entry_executor_config(),
+                ),
+            )
+        # create buy executor for pair Two
+        self.executors_actions.append(
+                CreateExecutorAction(
+                    controller_id=self.config.id,
+                    executor_config=self.get_pair_two_market_entry_executor_config(),
+                ),
+            )
+        # self.open_position()
+        # self._is_position_entry_in_progress = True
+        self.position_status = PositionStatus.ENTRY_IN_PROGRESS
+        return None
 
-    def open_position(self):
-        self._position_open_price_one = self.pair_one_current_price
-        self._position_open_price_two = self.pair_two_current_price
-        self._current_position_opened_at = int(time.time())
-        self._total_positions_opened_count += 1
-        self._has_active_position = True
+    def _check_and_handle_position_entry_process(self):
+        # check entry executors statuses
+        self.logger().info("Checking entry executors statuses...")
+        self._pair_one_active_executor_id = None
+        self._pair_two_active_executor_id = None
 
-    def close_position(self):
+        for executor in self.executors_info:
+            self.logger().info(f"EXECUTOR: {executor}")
+            if executor.status == RunnableStatus.RUNNING:
+                if executor.custom_info["level_id"] == PAIR_ONE_ENTRY_EXECUTOR_ID:
+                    self._pair_one_active_executor_id = executor.id
+                    self.logger().info(f"Pair One active executor: {executor.id}")
+                elif executor.custom_info["level_id"] == PAIR_TWO_ENTRY_EXECUTOR_ID:
+                    self._pair_two_active_executor_id = executor.id
+                    self.logger().info(f"Pair Two active executor: {executor.id}")
+
+                if self._pair_one_active_executor_id and self._pair_two_active_executor_id:
+                    self.logger().info("POSITIONS OPENED")
+                    self._total_positions_opened_count += 1
+                    self.position_status = PositionStatus.IN_POSITION
+                    self._position_open_price_one = self.pair_one_current_price
+                    self._position_open_price_two = self.pair_two_current_price
+                    self._current_position_opened_at = int(time.time())
+                    self._current_position_timeout_at = self._current_position_opened_at + self.config.position_max_duration_sec
+                    break
+
+        return None
+
+
+    def _check_and_handle_position_timeout(self, current_time: int) -> None:
+        if current_time > self._current_position_timeout_at:
+            if self._is_position_open_conditions():
+                self._current_position_timeout_at += self.config.position_max_duration_sec
+                self.logger().info("Position timeout has been prolonged")
+                return None
+            self._start_position_timeout_exit_process()
+        return None
+
+
+    def _start_position_timeout_exit_process(self):
+        self._start_close_position_process()
+        self.position_status = PositionStatus.TIMEOUT_EXIT_IN_PROGRESS
+        
+
+    def _check_and_handle_timeout_exit_process(self) -> None:
+        if self._is_position_closed():
+            self._positions_closed_by_timeout_count += 1
+            self._on_position_close()
+        return None
+       
+
+    def _is_position_closed(self) -> bool:
+        # TODO: optimize algo 
+        is_executor_one_terminated = False
+        is_executor_two_terminated = False
+
+        self.logger().info("IS_POSITION_CLOSED?")
+        self.logger().info(f"Pair One active executor: {self._pair_one_active_executor_id}")
+        self.logger().info(f"Pair Two active executor: {self._pair_two_active_executor_id}")
+        
+        for executor in self.executors_info:
+            self.logger().info(f"Executor: {executor}")
+            if executor.id == self._pair_one_active_executor_id:
+                is_executor_one_terminated = executor.status == RunnableStatus.TERMINATED
+            elif executor.id == self._pair_two_active_executor_id:
+                is_executor_two_terminated = executor.status == RunnableStatus.TERMINATED
+
+            if is_executor_one_terminated and is_executor_two_terminated:
+               return True
+        self.logger().info(f"is_executor_one_terminated: {is_executor_one_terminated}")
+        self.logger().info(f"is_executor_two_terminated: {is_executor_two_terminated}")
+        return False
+
+
+    def _check_and_handle_if_position_opened(self) -> bool:
+        executor_one = None
+        executor_two = None
+        for executor in self.executors_info:
+            if executor.status == RunnableStatus.RUNNING:
+                if executor.custom_info["level_id"] == PAIR_ONE_ENTRY_EXECUTOR_ID:
+                    self._pair_one_active_executor_id = executor.id
+                    executor_one = executor
+                elif executor.custom_info["level_id"] == PAIR_TWO_ENTRY_EXECUTOR_ID:
+                    self._pair_two_active_executor_id = executor.id
+                    executor_two = executor
+            if executor_one and executor_two:
+                self._position_open_price_one = float(executor_one.custom_info["current_position_average_price"])
+                self._position_open_price_two = float(executor_two.custom_info["current_position_average_price"])
+                if executor_one.custom_info["open_order_last_update"]:
+                    self._current_position_opened_at = int(executor_one.custom_info["open_order_last_update"])   
+                else:
+                    self._current_position_opened_at = int(executor.timestamp)
+                self._current_position_timeout_at = self._current_position_opened_at + self.config.position_max_duration_sec
+                return True
+        return False
+
+
+    def _on_position_close(self):
+        self.logger().info("POSITION CLOSED...")
+        self.position_status = PositionStatus.NO_POSITION
+
+        executor_1 = next((e for e in self.executors_info if e.custom_info["level_id"] == self._pair_one_active_executor_id), None)
+        executor_2 = next((e for e in self.executors_info if e.custom_info["level_id"] == self._pair_two_active_executor_id), None)
+        
+        if not executor_1 or not executor_2:
+            raise ValueError(f"Executor {self._pair_one_active_executor_id} or {self._pair_two_active_executor_id} not found")
+
+        # calculate pnl 
+        net_pnl_quote = executor_1.net_pnl_quote + executor_2.net_pnl_quote
         self.cumulative_delta = self.cumulative_delta * (1 + self._current_delta)
-        self.current_amount_quote = self.current_amount_quote + self._current_delta * self.config_total_amount_quote
-        self._position_open_price_one = 0.0
-        self._position_open_price_two = 0.0
-        self._total_positions_closed_count += 1
-        self._current_position_opened_at = 0
-        self._has_active_position = False
 
-    def create_position_config(
-        self,
-        trading_pair: str,
-        side: TradeType,
-        amount_quote: Decimal,
-        position_action: PositionAction = PositionAction.OPEN,
-    ) -> PositionExecutorConfig:
-        """Create a position executor configuration"""
+
+        self.logger().info("POSITION CLOSED...")
+        self.logger().info(f"Executor 1: {executor_1}")
+        self.logger().info(f"Executor 2: {executor_2}")
+        self.logger().info(f"Net PNL Quote: {net_pnl_quote}")
+        self.current_amount_quote = self.current_amount_quote + net_pnl_quote
+        self.logger().info(f"Current Amount Quote: {self.current_amount_quote}")
+
+        self._pair_one_active_executor_id = None
+        self._pair_two_active_executor_id = None
+        self.on_new_cycle_start()
+        return None
+
+
+    def _check_and_handle_stop_loss_exit_process(self) -> None:
+        if self._is_position_closed():
+            self._positions_closed_by_stop_loss_count += 1
+            self._on_position_close()
+        return None
+
+
+    def _check_and_handle_take_profit_exit_process(self) -> None:
+        if self._is_position_closed():
+            self._positions_closed_by_take_profit_count += 1
+            self._on_position_close()
+        return None
+
+    # def open_position(self):
+    #     self._position_open_price_one = self.pair_one_current_price
+    #     self._position_open_price_two = self.pair_two_current_price
+    #     self._current_position_opened_at = int(time.time())
+    #     self._total_positions_opened_count += 1
+    #     # self._has_active_position = True
+    #     self.position_status = PositionStatus.IN_POSITION
+
+    def _start_close_position_process(self):
+        self.executors_actions.append(
+            StopExecutorAction(
+                controller_id=self.config.id,
+                executor_id=self._pair_one_active_executor_id,
+            )
+        )
+        self.executors_actions.append(
+            StopExecutorAction(
+                controller_id=self.config.id,
+                executor_id=self._pair_two_active_executor_id,
+            )
+        )
+
+        # self.cumulative_delta = self.cumulative_delta * (1 + self._current_delta)
+        # self.current_amount_quote = self.current_amount_quote + self._current_delta * self.config_total_amount_quote
+        # self._position_open_price_one = 0.0
+        # self._position_open_price_two = 0.0
+        # self._total_positions_closed_count += 1
+        # self._current_position_opened_at = 0
+        # # self._has_active_position = False
+        # self.position_status = PositionStatus.NO_POSITION
+
+
+    def quantize_qty(self, qty: float) -> float:
+        qty_quantized = self.market_data_provider.quantize_order_amount(
+            self.config.connector_name, self.config.trading_pair, Decimal(str(qty))
+        )
+        qty_quantized_float = float(qty_quantized)
+        if math.isnan(qty_quantized_float):
+            self.logger().warning("Quantized qty is NaN. Using original qty: %s", qty)
+            qty_quantized_float = qty
+        return qty_quantized_float
+
+
+    def get_pair_one_market_entry_executor_config(self) -> PositionExecutorConfig:
+        amount = self.current_amount_quote / 2
+        price = self.pair_one_current_price
+        qty = amount / price
         return PositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
-            trading_pair=trading_pair,
-            side=side,
-            amount=amount_quote,
-            order_type=OrderType.MARKET,
-            position_action=position_action,
-            take_profit=self.config.take_profit_pct if position_action == PositionAction.OPEN else None,
-            stop_loss=self.config.stop_loss_pct if position_action == PositionAction.OPEN else None,
-            time_limit_seconds=self.config.time_limit_seconds if position_action == PositionAction.OPEN else None,
-            connector_name=self.config.first_pair.connector_name,  # Both pairs use same connector (Binance)
+            connector_name=self.config.connector_one,
+            trading_pair=self.config.trading_pair_one,
+            side=TradeType.SELL,
+            amount=qty,
+            level_id=PAIR_ONE_ENTRY_EXECUTOR_ID,
+            position_mode="ONEWAY",
+            triple_barrier_config=TripleBarrierConfig(
+                open_order_type=OrderType.MARKET,
+            ),
+        )
+
+    def get_pair_two_market_entry_executor_config(self) -> PositionExecutorConfig:
+        amount = self.current_amount_quote / 2
+        price = self.pair_two_current_price
+        qty = amount / price
+        return PositionExecutorConfig(
+            timestamp=self.market_data_provider.time(),
+            connector_name=self.config.connector_two,
+            trading_pair=self.config.trading_pair_two,
+            side=TradeType.BUY,
+            amount=qty,
+            level_id=PAIR_TWO_ENTRY_EXECUTOR_ID,
+            position_mode="ONEWAY",
+            triple_barrier_config=TripleBarrierConfig(
+                open_order_type=OrderType.MARKET,
+            ),
         )
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         """Determine what positions to open based on the BTC/ETH ratio"""
-        executor_actions = []
-
+        executor_actions = self.executors_actions
+        self.executors_actions = []
         return executor_actions
 
-        # Skip if prices are not valid
-        if self._first_pair_last_price <= 0 or self._second_pair_last_price <= 0:
-            return executor_actions
-
-        # Check for exit conditions first
-        if self._has_active_position and self._current_ratio >= self.config.exit_long_ratio:
-            # Close BTC long and ETH short positions
-            btc_config = self.create_position_config(
-                self.config.first_pair.trading_pair,
-                TradeType.SELL,  # Close long with sell
-                self.config.amount_quote_btc,
-                position_action=PositionAction.CLOSE,
-            )
-            eth_config = self.create_position_config(
-                self.config.second_pair.trading_pair,
-                TradeType.BUY,  # Close short with buy
-                self.config.amount_quote_eth,
-                position_action=PositionAction.CLOSE,
-            )
-            executor_actions.extend(
-                [
-                    CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
-                    CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
-                ]
-            )
-            self._has_active_position = False
-
-        elif self._active_first_pair_short and self._current_ratio <= self.config.exit_short_ratio:
-            # Close BTC short and ETH long positions
-            btc_config = self.create_position_config(
-                self.config.first_pair.trading_pair,
-                TradeType.BUY,  # Close short with buy
-                self.config.amount_quote_btc,
-                position_action=PositionAction.CLOSE,
-            )
-            eth_config = self.create_position_config(
-                self.config.second_pair.trading_pair,
-                TradeType.SELL,  # Close long with sell
-                self.config.amount_quote_eth,
-                position_action=PositionAction.CLOSE,
-            )
-            executor_actions.extend(
-                [
-                    CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
-                    CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
-                ]
-            )
-            self._active_first_pair_short = False
-
-        # Check for entry conditions
-        elif self._current_ratio <= self.config.lower_ratio and not self._has_active_position:
-            # Buy BTC and Sell ETH when ratio <= 5
-            btc_config = self.create_position_config(
-                self.config.first_pair.trading_pair, TradeType.BUY, self.config.amount_quote_btc
-            )
-            eth_config = self.create_position_config(
-                self.config.second_pair.trading_pair, TradeType.SELL, self.config.amount_quote_eth
-            )
-            executor_actions.extend(
-                [
-                    CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
-                    CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
-                ]
-            )
-            self._has_active_position = True
-            self._active_first_pair_short = False
-
-        elif self._current_ratio >= self.config.upper_ratio and not self._active_first_pair_short:
-            # Sell BTC and Buy ETH when ratio >= 6
-            btc_config = self.create_position_config(
-                self.config.first_pair.trading_pair, TradeType.SELL, self.config.amount_quote_btc
-            )
-            eth_config = self.create_position_config(
-                self.config.second_pair.trading_pair, TradeType.BUY, self.config.amount_quote_eth
-            )
-            executor_actions.extend(
-                [
-                    CreateExecutorAction(executor_config=btc_config, controller_id=self.config.id),
-                    CreateExecutorAction(executor_config=eth_config, controller_id=self.config.id),
-                ]
-            )
-            self._active_first_pair_short = True
-            self._has_active_position = False
-
-        return executor_actions
 
     async def update_processed_data(self):
         """Update any processed data needed by the controller"""
         if self._is_first_tick:
-            self.logger().info("First tick detected, starting controller...")
             self._is_first_tick = False
+            self.logger().info("First tick detected, starting controller...")
+            if self._check_and_handle_if_position_opened():
+                self.position_status = PositionStatus.IN_POSITION
+                self.logger().info("POSITION ALREADY OPENED in first tick")
+                return None
+                
             self.on_new_cycle_start()
             return None
 
         tick_current_time = int(time.time())
-
-        self.check_and_handle_position_timeout(tick_current_time)
-
         # Получить свежие цены current_price_one и current_price_two
         self.pair_one_current_price = float(
             self.market_data_provider.get_price_by_type(
@@ -558,18 +682,48 @@ class DeltaArbitrageControllerV1(ControllerBase):
         )
 
         self.update_reference_data(tick_current_time)
+        self.logger().info(f"STATUS: {self.position_status}")
 
-        if self._has_active_position:
+        if self.position_status == PositionStatus.ENTRY_IN_PROGRESS:
+            self._check_and_handle_position_entry_process()
+            
+        elif self.position_status == PositionStatus.TP_IN_PROGRESS:
+            self._check_and_handle_take_profit_exit_process()
+
+        elif self.position_status == PositionStatus.SL_IN_PROGRESS:
+            self._check_and_handle_stop_loss_exit_process()
+            
+        elif self.position_status == PositionStatus.TIMEOUT_EXIT_IN_PROGRESS:
+            self._check_and_handle_timeout_exit_process()
+
+        elif self.position_status == PositionStatus.IN_POSITION:
+            # self.logger().info("IN_POSITION - Checking position conditions...")
             self._current_delta = self.calculate_current_relative_delta()
-            self.check_and_handle_stop_loss()
-            self.check_and_handle_take_profit()
+            self._check_and_handle_stop_loss()
+            if self.position_status == PositionStatus.IN_POSITION:
+                self._check_and_handle_take_profit()
+            if self.position_status == PositionStatus.IN_POSITION:
+                self._check_and_handle_position_timeout(tick_current_time)
 
-        elif self.is_position_open_conditions():
-            self.open_position()
+        elif self.position_status == PositionStatus.NO_POSITION:
+            # self.logger().info("NO POSITION - Checking position open conditions...")
+            if self._check_and_handle_if_position_opened():
+                self.position_status = PositionStatus.IN_POSITION
+                self._total_positions_opened_count += 1
+                self.logger().info("POSITION ALREADY OPENED")
+            else: 
+                self._check_and_handle_position_open_conditions()
 
         save_controller_state_to_file(self, tick_current_time)
-
         return None
+
+
+    def _check_and_handle_position_open_conditions(self):
+        self.logger().info(f"Checking position open conditions: {self._is_position_open_conditions()}")
+
+        if self._is_position_open_conditions():
+            self._start_position_entry_process()
+
 
     def to_format_status(self) -> List[str]:
         """Format the current status for display"""
@@ -582,8 +736,10 @@ class DeltaArbitrageControllerV1(ControllerBase):
             f"Position open upper threshold: {self.config.open_position_upper_threshold}",
             f"Position take profit threshold: {self.config.take_profit_threshold}",
             f"Position stop loss threshold: {self.config.stop_loss_threshold}",
-            f"Has active position: {self._has_active_position}",
-            f"Cumulative delta: {self.cumulative_delta}",
+            f"Position max duration: {self.config.position_max_duration_sec} seconds",
+            f"Position status: {self.position_status.value.upper()}",
+            f"Active executor ONE: {self._pair_one_active_executor_id}",
+            f"Active executor TWO: {self._pair_two_active_executor_id}",
             f"Total positions opened count: {self._total_positions_opened_count}",
             f"Total positions closed count: {self._total_positions_closed_count}",
             f"Positions closed by timeout count: {self._positions_closed_by_timeout_count}",
@@ -592,6 +748,10 @@ class DeltaArbitrageControllerV1(ControllerBase):
             f"Current position opened at: {self._current_position_opened_at}",
             f"Reference delta updated at: {self._reference_delta_updated_at}",
             f"Reference prices updated at: {self._reference_prices_updated_at}",
+            f"Position open price ONE: {self._position_open_price_one}",
+            f"Position open price TWO: {self._position_open_price_two}",
+            f"Time until timeout: {self._current_position_timeout_at - int(time.time())}"
+            f"Cumulative delta: {self.cumulative_delta}",
             f"Current amount quote: {self.current_amount_quote}",
         ]
 
@@ -614,7 +774,7 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "reference_delta_updated_at",
         "reference_delta",
         "current_delta",
-        "has_active_position",
+        "position_status",
         "position_open_lower_threshold",
         "position_open_upper_threshold",
         "position_take_profit_threshold",
@@ -641,7 +801,7 @@ def save_controller_state_to_file(controller: DeltaArbitrageControllerV1, timest
         "reference_delta_updated_at": controller._reference_delta_updated_at,
         "reference_delta": controller._reference_delta,
         "current_delta": controller._current_delta,
-        "has_active_position": controller._has_active_position,
+        "position_status": controller.position_status.value,
         "position_open_lower_threshold": controller.config.open_position_lower_threshold,
         "position_open_upper_threshold": controller.config.open_position_upper_threshold,
         "position_take_profit_threshold": controller.config.take_profit_threshold,
