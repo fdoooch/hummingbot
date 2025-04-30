@@ -12,7 +12,6 @@ from hummingbot.core.data_type.common import PriceType, TradeType
 from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
-from hummingbot.core.data_type.common import OrderType, PositionAction
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.client.config.config_data_types import ClientFieldData
 from pydantic import BaseModel
