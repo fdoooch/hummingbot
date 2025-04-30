@@ -8,7 +8,7 @@ import math
 from enum import Enum
 
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
-from hummingbot.core.data_type.common import PriceType, TradeType
+from hummingbot.core.data_type.common import PriceType, TradeType, OrderType
 from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
@@ -749,7 +749,7 @@ class DeltaArbitrageControllerV1(ControllerBase):
             f"Reference prices updated at: {self._reference_prices_updated_at}",
             f"Position open price ONE: {self._position_open_price_one}",
             f"Position open price TWO: {self._position_open_price_two}",
-            f"Time until timeout: {self._current_position_timeout_at - int(time.time())}"
+            f"Time until timeout: {self._current_position_timeout_at - int(time.time())}",
             f"Cumulative delta: {self.cumulative_delta}",
             f"Current amount quote: {self.current_amount_quote}",
         ]
